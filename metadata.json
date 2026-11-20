@@ -1,0 +1,6 @@
+{
+  "name": "ProcPulse",
+  "description": "Offline-first Android system task manager, real-time hardware resource monitor, floating HUD overlay, and blackbox profiler.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

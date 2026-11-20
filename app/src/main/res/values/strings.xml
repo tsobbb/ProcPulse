@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">ProcPulse</string>
+    <string name="tile_hud_label">ProcPulse HUD</string>
+    <string name="tile_profiler_label">Blackbox Запись</string>
+    <string name="nav_monitor">Монитор</string>
+    <string name="nav_processes">Процессы</string>
+    <string name="nav_overlay">Оверлей</string>
+    <string name="nav_profiler">Профайлер</string>
+    <string name="nav_settings">Настройки</string>
+    <string name="channel_monitor_name">Системный монитор и HUD</string>
+    <string name="channel_profiler_name">Blackbox Профайлер</string>
+    <string name="channel_watchdog_name">Уведомления Watchdog</string>
+</resources>
