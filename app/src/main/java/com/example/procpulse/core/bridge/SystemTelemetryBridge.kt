@@ -20,7 +20,11 @@ interface SystemTelemetryBridge {
 
     suspend fun refreshCapabilities(settings: AppSettings): CapabilityTier
 
-    suspend fun collectSnapshot(settings: AppSettings): SystemSnapshot
+    suspend fun collectSnapshot(
+        settings: AppSettings,
+        includeTopConsumers: Boolean = true,
+        includeLagDiagnostics: Boolean = false
+    ): SystemSnapshot
 
     suspend fun collectProcesses(
         settings: AppSettings,
@@ -40,12 +44,18 @@ interface SystemTelemetryBridge {
 
     suspend fun checkRootAccess(): Boolean
 
+    suspend fun controlTimestats(enable: Boolean): Boolean
+
+    fun unbindShizukuService()
+
+    suspend fun reconnectShizukuIfAlive(): Boolean
+
     // Task Control Actions
     suspend fun killBackground(packageName: String): ProcessActionOutcome
     suspend fun forceStop(packageName: String): ProcessActionOutcome
     suspend fun setFreeze(packageName: String, freeze: Boolean): ProcessActionOutcome
     suspend fun setBackgroundRestricted(packageName: String, restrict: Boolean): ProcessActionOutcome
-    suspend fun sendSignal(pid: Int, signal: Int): ProcessActionOutcome // e.g., 9=SIGKILL, 19=SIGSTOP, 18=SIGCONT
+    suspend fun sendSignal(pid: Int, signal: Int): ProcessActionOutcome
     suspend fun reniceProcess(pid: Int, nice: Int): ProcessActionOutcome
     suspend fun setCpuAffinity(pid: Int, hexMask: String): ProcessActionOutcome
     suspend fun setComponentEnabled(packageName: String, componentClass: String, enabled: Boolean): ProcessActionOutcome

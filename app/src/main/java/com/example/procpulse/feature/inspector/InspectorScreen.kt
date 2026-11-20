@@ -4,7 +4,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,7 +19,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -30,14 +28,10 @@ import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -56,6 +50,9 @@ import com.example.procpulse.core.model.LogcatEntry
 import com.example.procpulse.core.model.ProcessDetail
 import com.example.procpulse.core.ui.HonestDegradationBanner
 import com.example.procpulse.core.ui.PrecisionCard
+import com.example.procpulse.core.ui.PrecisionFilterChip
+import com.example.procpulse.core.ui.PrecisionSlider
+import com.example.procpulse.core.ui.PrecisionSwitch
 import com.example.ui.theme.LocalProcPulsePalette
 import com.example.ui.theme.TnumText
 import java.util.Locale
@@ -114,6 +111,7 @@ fun InspectorScreen(
     }
 
     val entry = detail.entry
+    val pid = entry.pid
     val filteredLogs = remember(logcatEntries, logcatLevel, logcatFilter) {
         val order = mapOf('V' to 0, 'D' to 1, 'I' to 2, 'W' to 3, 'E' to 4)
         val minLvl = order[logcatLevel] ?: 0
@@ -142,7 +140,7 @@ fun InspectorScreen(
                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Назад")
                         }
                     }
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = entry.displayName,
                             style = TnumText.CardMetric,
@@ -150,15 +148,25 @@ fun InspectorScreen(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        Text(
-                            text = "${entry.packageName} · PID ${entry.pid} · UID ${entry.uid}",
-                            style = TnumText.MicroLabel,
-                            color = palette.textSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = entry.packageName,
+                                style = TnumText.MicroLabel,
+                                color = palette.textSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            Text(
+                                text = " · PID ${pid?.toString() ?: "N/A"} · UID ${entry.uid}",
+                                style = TnumText.MicroLabel,
+                                color = palette.textSecondary,
+                                maxLines = 1
+                            )
+                        }
                     }
                 }
+                Spacer(Modifier.width(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     OutlinedButton(
                         onClick = { onExportJson(detail) },
@@ -270,8 +278,8 @@ fun InspectorScreen(
         // 3. Task Control Deck
         item {
             var niceSlider by remember(detail.nice) { mutableFloatStateOf((detail.nice ?: 0).toFloat()) }
+            val canUsePidRoot = activeTier == CapabilityTier.ROOT && pid != null
             PrecisionCard(title = "Управление процессом (${activeTier.shortLabel})") {
-                // Whitelist / Blacklist toggles
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -297,7 +305,6 @@ fun InspectorScreen(
                 }
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Tier 0 actions
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -319,7 +326,6 @@ fun InspectorScreen(
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
-                // Tier 1 (Shizuku) actions
                 Text("TIER 1 (SHIZUKU / SHELL)", style = TnumText.MicroLabel, color = palette.textMuted)
                 Spacer(modifier = Modifier.height(4.dp))
                 FlowRow(
@@ -354,7 +360,6 @@ fun InspectorScreen(
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
-                // Tier 2 (Root) actions
                 Text("TIER 2 (ROOT KERNEL CONTROL)", style = TnumText.MicroLabel, color = palette.textMuted)
                 Spacer(modifier = Modifier.height(4.dp))
                 FlowRow(
@@ -362,8 +367,8 @@ fun InspectorScreen(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Button(
-                        onClick = { onSendSignal(entry.pid, 9) },
-                        enabled = activeTier == CapabilityTier.ROOT && !entry.isProtected,
+                        onClick = { pid?.let { onSendSignal(it, 9) } },
+                        enabled = canUsePidRoot && !entry.isProtected,
                         colors = ButtonDefaults.buttonColors(containerColor = palette.critRed),
                         modifier = Modifier.height(38.dp),
                         shape = RoundedCornerShape(4.dp)
@@ -371,8 +376,8 @@ fun InspectorScreen(
                         Text("SIGKILL (-9)", style = TnumText.MicroLabel)
                     }
                     OutlinedButton(
-                        onClick = { onSendSignal(entry.pid, if (entry.isFrozenOrStopped) 18 else 19) },
-                        enabled = activeTier == CapabilityTier.ROOT && !entry.isProtected,
+                        onClick = { pid?.let { onSendSignal(it, if (entry.isFrozenOrStopped) 18 else 19) } },
+                        enabled = canUsePidRoot && !entry.isProtected,
                         modifier = Modifier.height(38.dp),
                         shape = RoundedCornerShape(4.dp)
                     ) {
@@ -388,16 +393,17 @@ fun InspectorScreen(
                         color = palette.textPrimary,
                         modifier = Modifier.width(84.dp)
                     )
-                    Slider(
+                    PrecisionSlider(
                         value = niceSlider,
                         onValueChange = { niceSlider = it },
                         valueRange = -20f..19f,
-                        enabled = activeTier == CapabilityTier.ROOT,
+                        enabled = canUsePidRoot,
                         modifier = Modifier.weight(1f)
                     )
+                    Spacer(Modifier.width(8.dp))
                     OutlinedButton(
-                        onClick = { onRenice(entry.pid, niceSlider.roundToInt()) },
-                        enabled = activeTier == CapabilityTier.ROOT,
+                        onClick = { pid?.let { onRenice(it, niceSlider.roundToInt()) } },
+                        enabled = canUsePidRoot,
                         modifier = Modifier.height(34.dp),
                         shape = RoundedCornerShape(4.dp)
                     ) {
@@ -405,11 +411,12 @@ fun InspectorScreen(
                     }
                 }
 
+                Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf("0f" to "Eff (0x0F)", "f0" to "Perf (0xF0)", "ff" to "All (0xFF)").forEach { (mask, label) ->
                         OutlinedButton(
-                            onClick = { onTaskset(entry.pid, mask) },
-                            enabled = activeTier == CapabilityTier.ROOT,
+                            onClick = { pid?.let { onTaskset(it, mask) } },
+                            enabled = canUsePidRoot,
                             modifier = Modifier.weight(1f).height(34.dp),
                             shape = RoundedCornerShape(4.dp)
                         ) {
@@ -470,7 +477,7 @@ fun InspectorScreen(
                                 Text(comp.name.substringAfterLast('.'), style = TnumText.MicroLabel, color = palette.textPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(comp.type, style = TnumText.MicroLabel, color = palette.textMuted)
                             }
-                            Switch(
+                            PrecisionSwitch(
                                 checked = comp.enabled,
                                 enabled = activeTier == CapabilityTier.ROOT,
                                 onCheckedChange = { enabled ->
@@ -486,7 +493,7 @@ fun InspectorScreen(
         // 6. Live Logcat
         item {
             PrecisionCard(
-                title = "Live Logcat (PID ${entry.pid})",
+                title = "Live Logcat (${pid?.let { "PID $it" } ?: "PID N/A"})",
                 trailingBadge = {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         IconButton(onClick = onToggleLogcatPause, modifier = Modifier.size(32.dp)) {
@@ -508,10 +515,10 @@ fun InspectorScreen(
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     listOf('V', 'D', 'I', 'W', 'E').forEach { lvl ->
-                        FilterChip(
+                        PrecisionFilterChip(
                             selected = logcatLevel == lvl,
                             onClick = { onLogcatLevelChange(lvl) },
-                            label = { Text(lvl.toString(), style = TnumText.MicroLabel) },
+                            label = lvl.toString(),
                             modifier = Modifier.height(30.dp)
                         )
                     }
@@ -526,8 +533,8 @@ fun InspectorScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(modifier = Modifier.height(6.dp))
-                if (activeTier == CapabilityTier.STANDARD) {
-                    Text("Чтение Live Logcat доступно в Tier 1 (Shizuku) и Tier 2 (Root).", style = TnumText.MicroLabel, color = palette.textMuted)
+                if (activeTier == CapabilityTier.STANDARD || pid == null) {
+                    Text("Чтение Live Logcat доступно в Tier 1 (Shizuku) и Tier 2 (Root) при известном PID.", style = TnumText.MicroLabel, color = palette.textMuted)
                 } else if (filteredLogs.isEmpty()) {
                     Text("Нет записей лога для данного фильтра.", style = TnumText.MicroLabel, color = palette.textMuted)
                 } else {

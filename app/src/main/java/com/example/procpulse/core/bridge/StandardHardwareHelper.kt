@@ -15,10 +15,14 @@ import android.opengl.EGLConfig
 import android.opengl.GLES20
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Debug
+import android.os.Environment
 import android.os.PowerManager
 import android.os.Process
+import android.os.StatFs
 import com.example.procpulse.core.model.AppSettings
 import com.example.procpulse.core.model.BatteryTelemetry
+import com.example.procpulse.core.model.CpuCapClusterInfo
 import com.example.procpulse.core.model.CpuClusterRole
 import com.example.procpulse.core.model.CpuCoreSnapshot
 import com.example.procpulse.core.model.CpuTelemetry
@@ -29,12 +33,13 @@ import com.example.procpulse.core.model.NetworkTelemetry
 import com.example.procpulse.core.model.ProcessCategory
 import com.example.procpulse.core.model.ProcessEntry
 import com.example.procpulse.core.model.ProcessStateTag
+import com.example.procpulse.core.model.SysfsAvailability
 import com.example.procpulse.core.model.ThermalLevel
 import com.example.procpulse.core.model.ThermalTelemetry
 import com.example.procpulse.core.model.ThermalZoneInfo
 import com.example.procpulse.core.nativebridge.NativeProcReader
-import java.io.File
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 class StandardHardwareHelper(
     private val context: Context,
@@ -46,7 +51,7 @@ class StandardHardwareHelper(
     private val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     private val usageStatsManager = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
 
-    private val coreCount = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+    val coreCount = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
     private val cachedMaxFreqsMhz = IntArray(coreCount)
     private val cachedClusterRoles = Array(coreCount) { CpuClusterRole.EFF }
 
@@ -54,7 +59,7 @@ class StandardHardwareHelper(
     private var cachedGpuRenderer: String = "GLES"
     private var gpuQueried = false
 
-    // Session network & battery tracking
+    // Session network tracking
     private var prevNetTimeMs = 0L
     private var prevMobileRx = 0L
     private var prevMobileTx = 0L
@@ -63,11 +68,13 @@ class StandardHardwareHelper(
     private var sessionWifiStartTotal = -1L
     private var sessionCellStartTotal = -1L
 
-    private var batterySessionStartMs = System.currentTimeMillis()
-    private var batterySessionStartPct = -1
+    // Battery EMA current tracking for smooth %/h calculation
+    private var emaCurrentMa = 0f
+    private var emaInitialized = false
 
     // Reusable native buffers
     private val procStatBuf = LongArray(3 + (coreCount + 1) * 8)
+    private val procQueueBuf = LongArray(2)
     private val prevCoreActive = LongArray(coreCount + 1)
     private val prevCoreTotal = LongArray(coreCount + 1)
     private val prevUser = LongArray(1)
@@ -153,7 +160,10 @@ class StandardHardwareHelper(
         }
     }
 
-    fun readCpuTelemetry(overrideStatLines: String? = null): CpuTelemetry {
+    fun readCpuTelemetry(
+        overrideStatLines: String? = null,
+        overrideClusterCaps: List<CpuCapClusterInfo>? = null
+    ): CpuTelemetry {
         val now = System.currentTimeMillis()
         val statRead = if (overrideStatLines != null) {
             parseStatTextIntoBuffer(overrideStatLines, procStatBuf)
@@ -168,11 +178,12 @@ class StandardHardwareHelper(
         var ioWaitPct: Float? = null
         var ctxtRate: Long? = null
         var intrRate: Long? = null
+        var procsRunning: Int? = null
+        var procsBlocked: Int? = null
 
         val dtSec = if (prevStatTimeMs > 0) ((now - prevStatTimeMs).coerceAtLeast(100L) / 1000.0) else 1.0
 
         if (isExact) {
-            // slot 0 = total CPU
             val u = procStatBuf[3] + procStatBuf[4]
             val s = procStatBuf[5] + procStatBuf[8] + procStatBuf[9]
             val idle = procStatBuf[6]
@@ -208,12 +219,26 @@ class StandardHardwareHelper(
             prevCtxt = procStatBuf[1]
             prevIntr = procStatBuf[2]
             prevStatTimeMs = now
+
+            if (overrideStatLines != null) {
+                for (line in overrideStatLines.lineSequence()) {
+                    if (line.startsWith("procs_running ")) {
+                        procsRunning = line.substringAfter("procs_running ").trim().toIntOrNull()
+                    } else if (line.startsWith("procs_blocked ")) {
+                        procsBlocked = line.substringAfter("procs_blocked ").trim().toIntOrNull()
+                    }
+                }
+            } else if (NativeProcReader.readProcStatQueue(procQueueBuf)) {
+                procsRunning = procQueueBuf[0].toInt()
+                procsBlocked = procQueueBuf[1].toInt()
+            }
         }
 
         NativeProcReader.readCpuCurFreqsBatch(coreCount, curFreqsKhzBuf)
         val governor = cachedGovernor ?: (NativeProcReader.readTextFile("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") ?: "schedutil").also {
             cachedGovernor = it
         }
+        val capByRole = overrideClusterCaps?.associateBy { it.role } ?: emptyMap()
         val cores = ArrayList<CpuCoreSnapshot>(coreCount)
         for (i in 0 until coreCount) {
             val curMhz = (curFreqsKhzBuf[i] / 1000L).toInt()
@@ -221,6 +246,8 @@ class StandardHardwareHelper(
                 val maxKhz = NativeProcReader.readLongFile("/sys/devices/system/cpu/cpu$i/cpufreq/cpuinfo_max_freq") ?: 0L
                 cachedMaxFreqsMhz[i] = (maxKhz / 1000L).toInt()
             }
+            val role = cachedClusterRoles[i]
+            val capInfo = capByRole[role]
 
             var coreUsage: Float? = null
             if (isExact && i + 1 <= statRead) {
@@ -245,11 +272,15 @@ class StandardHardwareHelper(
             cores.add(
                 CpuCoreSnapshot(
                     coreIndex = i,
-                    clusterRole = cachedClusterRoles[i],
+                    clusterRole = role,
                     usagePercent = coreUsage,
                     currentFreqMhz = curMhz,
                     maxFreqMhz = cachedMaxFreqsMhz[i],
-                    governor = governor
+                    governor = capInfo?.governor ?: governor,
+                    scalingMinMhz = capInfo?.scalingMinMhz ?: 0,
+                    scalingMaxMhz = capInfo?.scalingMaxMhz ?: cachedMaxFreqsMhz[i],
+                    cpuinfoMaxMhz = capInfo?.cpuinfoMaxMhz ?: cachedMaxFreqsMhz[i],
+                    isOnline = true
                 )
             )
         }
@@ -263,7 +294,9 @@ class StandardHardwareHelper(
             interruptsPerSec = intrRate,
             activeGovernor = governor,
             cores = cores,
-            isUsageExact = isExact
+            isUsageExact = isExact,
+            procsRunning = procsRunning,
+            procsBlocked = procsBlocked
         )
     }
 
@@ -271,12 +304,15 @@ class StandardHardwareHelper(
         overrideBusyPct: Float? = null,
         overrideCurMhz: Int? = null,
         overrideMaxMhz: Int? = null,
-        overrideDdrMhz: Int? = null
+        overrideDdrMhz: Int? = null,
+        overrideGpuAvail: SysfsAvailability? = null,
+        overrideDdrAvail: SysfsAvailability? = null
     ): GpuTelemetry {
         queryGpuInfoOnce()
-        val busy = overrideBusyPct
-            ?: NativeProcReader.readTextFile("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage")
-                ?.replace("%", "")?.trim()?.toFloatOrNull()
+        val busyOutcome = if (overrideBusyPct == null) {
+            NativeProcReader.readNodeWithStatus("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage")
+        } else null
+        val busy = overrideBusyPct ?: busyOutcome?.text?.replace("%", "")?.trim()?.toFloatOrNull()
         val curMhz = overrideCurMhz
             ?: NativeProcReader.readLongFile("/sys/class/kgsl/kgsl-3d0/clock_mhz")?.toInt()
             ?: NativeProcReader.readLongFile("/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq")?.let { (it / 1_000_000L).toInt() }
@@ -284,20 +320,31 @@ class StandardHardwareHelper(
             ?: NativeProcReader.readLongFile("/sys/class/kgsl/kgsl-3d0/max_clock_mhz")?.toInt()
             ?: NativeProcReader.readLongFile("/sys/class/kgsl/kgsl-3d0/devfreq/max_freq")?.let { (it / 1_000_000L).toInt() }
 
+        val gpuAvail = overrideGpuAvail ?: when {
+            busy != null || curMhz != null -> SysfsAvailability.AVAILABLE
+            busyOutcome != null -> busyOutcome.availability
+            else -> SysfsAvailability.NOT_IN_KERNEL
+        }
+        val ddrAvail = overrideDdrAvail ?: if (overrideDdrMhz != null) SysfsAvailability.AVAILABLE else SysfsAvailability.SELINUX_DENIED
+
         return GpuTelemetry(
             rendererName = cachedGpuRenderer,
             vendorName = cachedGpuVendor,
             usagePercent = busy,
             currentFreqMhz = curMhz,
             maxFreqMhz = maxMhz,
-            ddrFreqMhz = overrideDdrMhz
+            ddrFreqMhz = overrideDdrMhz,
+            gpuAvailability = gpuAvail,
+            ddrAvailability = ddrAvail
         )
     }
 
     fun readMemoryTelemetry(
         overrideMemInfoText: String? = null,
         overrideZramText: String? = null,
-        overridePsiText: String? = null
+        overridePsiText: String? = null,
+        overrideZramAvail: SysfsAvailability? = null,
+        overridePsiAvail: SysfsAvailability? = null
     ): MemoryTelemetry {
         val sysMemInfo = ActivityManager.MemoryInfo()
         activityManager.getMemoryInfo(sysMemInfo)
@@ -310,54 +357,83 @@ class StandardHardwareHelper(
             NativeProcReader.readMemInfo(memInfoBuf)
         }
 
-        val zramRead = if (overrideZramText != null) {
+        var zramAvail = overrideZramAvail ?: SysfsAvailability.AVAILABLE
+        val zramRead = if (overrideZramText != null && overrideZramText.isNotBlank()) {
             val parts = overrideZramText.trim().split(Regex("\\s+"))
             if (parts.size >= 3) {
                 zramBuf[0] = parts[0].toLongOrNull() ?: 0L
                 zramBuf[1] = parts[1].toLongOrNull() ?: 0L
                 zramBuf[2] = parts[2].toLongOrNull() ?: 0L
+                zramAvail = SysfsAvailability.AVAILABLE
                 true
-            } else false
+            } else {
+                if (overrideZramAvail == null) zramAvail = SysfsAvailability.NOT_IN_KERNEL
+                false
+            }
+        } else if (overrideZramText == null && NativeProcReader.readZramMmStat(zramBuf)) {
+            zramAvail = SysfsAvailability.AVAILABLE
+            true
         } else {
-            NativeProcReader.readZramMmStat(zramBuf)
+            if (overrideZramAvail == null) {
+                zramAvail = NativeProcReader.readNodeWithStatus("/sys/block/zram0/mm_stat").availability
+            }
+            false
         }
 
-        val psiRead = if (overridePsiText != null) {
+        var psiAvail = overridePsiAvail ?: SysfsAvailability.AVAILABLE
+        val psiRead = if (overridePsiText != null && overridePsiText.isNotBlank()) {
             val some = Regex("""some avg10=([0-9.]+)""").find(overridePsiText)?.groupValues?.get(1)?.toDoubleOrNull()
             val full = Regex("""full avg10=([0-9.]+)""").find(overridePsiText)?.groupValues?.get(1)?.toDoubleOrNull()
             if (some != null) {
                 psiBuf[0] = some
                 psiBuf[1] = full ?: 0.0
+                psiAvail = SysfsAvailability.AVAILABLE
                 true
-            } else false
+            } else {
+                if (overridePsiAvail == null) psiAvail = SysfsAvailability.NOT_IN_KERNEL
+                false
+            }
+        } else if (overridePsiText == null && NativeProcReader.readPsiMemory(psiBuf)) {
+            psiAvail = SysfsAvailability.AVAILABLE
+            true
         } else {
-            NativeProcReader.readPsiMemory(psiBuf)
+            if (overridePsiAvail == null) {
+                psiAvail = NativeProcReader.readNodeWithStatus("/proc/pressure/memory").availability
+            }
+            false
         }
 
         val totalMb = if (memRead && memInfoBuf[0] > 0) memInfoBuf[0] / 1024L else totalAmMb
-        val freeMb = if (memRead) memInfoBuf[1] / 1024L else availAmMb
+        val rawFreeMb = if (memRead) memInfoBuf[1] / 1024L else availAmMb
         val availMb = if (memRead && memInfoBuf[2] > 0) memInfoBuf[2] / 1024L else availAmMb
-        val cachedMb = if (memRead) (memInfoBuf[3] + memInfoBuf[4] + memInfoBuf[5]) / 1024L else 0L
+        val rawCachedMb = if (memRead) (memInfoBuf[3] + memInfoBuf[4] + memInfoBuf[5]) / 1024L else 0L
         val slabMb = if (memRead) memInfoBuf[10] / 1024L else 0L
-        val anonMb = if (memRead && (memInfoBuf[8] + memInfoBuf[9]) > 0) {
+
+        // Strict RAM segment balance: App/Anon + Cache + Other(Kernel/DMA/Slab) + Free == MemTotal
+        val freeMb = rawFreeMb.coerceIn(0L, totalMb)
+        val maxNonFree = (totalMb - freeMb).coerceAtLeast(0L)
+        val rawAnon = if (memRead && (memInfoBuf[8] + memInfoBuf[9]) > 0) {
             (memInfoBuf[8] + memInfoBuf[9]) / 1024L
         } else {
-            (totalMb - freeMb - cachedMb - slabMb).coerceAtLeast(0L)
+            (maxNonFree - rawCachedMb - slabMb).coerceAtLeast(0L)
         }
+        val appAnonMb = rawAnon.coerceIn(0L, maxNonFree)
+        val cachedMb = rawCachedMb.coerceIn(0L, (maxNonFree - appAnonMb).coerceAtLeast(0L))
+        val otherKernelMb = (totalMb - appAnonMb - cachedMb - freeMb).coerceAtLeast(0L)
 
         val zramTotalMb = if (memRead) memInfoBuf[6] / 1024L else 0L
         val zramSwapUsedMb = if (memRead) (memInfoBuf[6] - memInfoBuf[7]).coerceAtLeast(0L) / 1024L else 0L
-        val zramOrigMb = if (zramRead) zramBuf[0] / (1024L * 1024L) else zramSwapUsedMb
+        val zramOrigMb = if (zramRead) zramBuf[0] / (1024L * 1024L) else 0L
         val zramComprMb = if (zramRead) zramBuf[1] / (1024L * 1024L) else 0L
         val zramRatio = if (zramRead && zramBuf[1] > 0) {
             (zramBuf[0].toFloat() / zramBuf[1].toFloat()).coerceIn(0.5f, 15f)
-        } else 1.0f
+        } else 0f
 
         return MemoryTelemetry(
             totalMb = totalMb,
-            appAnonMb = anonMb,
+            appAnonMb = appAnonMb,
             cachedMb = cachedMb,
-            kernelSlabMb = slabMb,
+            kernelSlabMb = otherKernelMb,
             freeMb = freeMb,
             availableMb = availMb,
             zramTotalMb = zramTotalMb,
@@ -367,7 +443,9 @@ class StandardHardwareHelper(
             zramRatio = zramRatio,
             psiSomeAvg10 = if (psiRead) psiBuf[0] else null,
             psiFullAvg10 = if (psiRead) psiBuf[1] else null,
-            isDetailedExact = memRead
+            isDetailedExact = memRead,
+            zramAvailability = zramAvail,
+            psiAvailability = psiAvail
         )
     }
 
@@ -375,17 +453,41 @@ class StandardHardwareHelper(
         val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, 100)?.coerceAtLeast(1) ?: 100
-        val pct = if (level >= 0) (level * 100) / scale else batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        val pct = (if (level >= 0) (level * 100) / scale else batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY))
+            .coerceIn(0, 100)
         val voltageMv = intent?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0) ?: 0
         val tempTenths = intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0
         val tempC = tempTenths / 10f
-        val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
+
+        val propStatus = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_STATUS)
+        } else {
+            BatteryManager.BATTERY_STATUS_UNKNOWN
+        }
+        val intentStatus = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
             ?: BatteryManager.BATTERY_STATUS_UNKNOWN
+        val status = if (propStatus in listOf(
+                BatteryManager.BATTERY_STATUS_CHARGING,
+                BatteryManager.BATTERY_STATUS_DISCHARGING,
+                BatteryManager.BATTERY_STATUS_FULL,
+                BatteryManager.BATTERY_STATUS_NOT_CHARGING
+            )
+        ) propStatus else intentStatus
+
         val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
 
         val rawCurrent = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW).toFloat()
         var currentMa = when (settings.currentCalibrationMode) {
-            CurrentCalibrationMode.AUTO -> if (abs(rawCurrent) > 15_000f) rawCurrent / 1000f else rawCurrent
+            CurrentCalibrationMode.AUTO -> {
+                val mag = if (abs(rawCurrent) > 15_000f) abs(rawCurrent) / 1000f else abs(rawCurrent)
+                when (status) {
+                    BatteryManager.BATTERY_STATUS_CHARGING -> mag
+                    BatteryManager.BATTERY_STATUS_DISCHARGING,
+                    BatteryManager.BATTERY_STATUS_NOT_CHARGING -> -mag
+                    BatteryManager.BATTERY_STATUS_FULL -> if (rawCurrent < 0f) -mag else mag
+                    else -> if (abs(rawCurrent) > 15_000f) rawCurrent / 1000f else rawCurrent
+                }
+            }
             CurrentCalibrationMode.MICRO_TO_MILLI -> rawCurrent / 1000f
             CurrentCalibrationMode.MILLI_TO_MILLI -> rawCurrent
             CurrentCalibrationMode.DIVIDE_BY_10 -> rawCurrent / 10f
@@ -399,21 +501,26 @@ class StandardHardwareHelper(
         val chargeCounterMah = if (chargeCounterUah > 0) {
             if (chargeCounterUah > 100_000) chargeCounterUah / 1000 else chargeCounterUah
         } else 0
+
+        val estimatedFullCap = if (chargeCounterMah > 0 && pct > 0) {
+            (chargeCounterMah / (pct / 100f)).roundToInt()
+        } else 0
+
         val designCap = readDesignCapacityMah()
 
-        val now = System.currentTimeMillis()
-        if (batterySessionStartPct < 0) {
-            batterySessionStartPct = pct
-            batterySessionStartMs = now
-        }
-        val elapsedHrs = ((now - batterySessionStartMs).coerceAtLeast(60_000L)) / 3_600_000f
-        val ratePctHr = if (now - batterySessionStartMs > 30_000L) {
-            (pct - batterySessionStartPct) / elapsedHrs
+        // Smooth %/h via EMA of calibrated current: (avgCurrentMa / capacity) * 100f
+        if (!emaInitialized) {
+            emaCurrentMa = currentMa
+            emaInitialized = true
         } else {
-            val estCapacity = if (designCap > 0) designCap.toFloat() else 4500f
-            val signedMa = if (isCharging) abs(currentMa) else -abs(currentMa)
-            (signedMa / estCapacity) * 100f
+            emaCurrentMa = emaCurrentMa * 0.75f + currentMa * 0.25f
         }
+        val capForRate = when {
+            designCap > 0 -> designCap.toFloat()
+            estimatedFullCap > 500 -> estimatedFullCap.toFloat()
+            else -> 4500f
+        }
+        val ratePctHr = (emaCurrentMa / capForRate) * 100f
 
         val statusLabel = when (status) {
             BatteryManager.BATTERY_STATUS_CHARGING -> "Зарядка"
@@ -424,12 +531,13 @@ class StandardHardwareHelper(
         }
 
         return BatteryTelemetry(
-            percent = pct.coerceIn(0, 100),
+            percent = pct,
             currentMa = currentMa,
             voltageMv = voltageMv,
             powerWatts = powerWatts,
             ratePctPerHour = ratePctHr,
             chargeCounterMah = chargeCounterMah,
+            estimatedFullCapacityMah = estimatedFullCap,
             designCapacityMah = designCap,
             isCharging = isCharging,
             statusLabel = statusLabel,
@@ -563,10 +671,29 @@ class StandardHardwareHelper(
         )
     }
 
+    fun getSelfPssMb(): Float {
+        return runCatching {
+            val mi = Debug.MemoryInfo()
+            Debug.getMemoryInfo(mi)
+            mi.totalPss / 1024f
+        }.getOrDefault(0f)
+    }
+
+    fun getDataPartitionFreePercent(): Float? {
+        return runCatching {
+            val stat = StatFs(Environment.getDataDirectory().path)
+            val total = stat.totalBytes.coerceAtLeast(1L)
+            val avail = stat.availableBytes.coerceAtLeast(0L)
+            (avail.toFloat() / total.toFloat()) * 100f
+        }.getOrNull()
+    }
+
     fun collectTier0Processes(settings: AppSettings): List<ProcessEntry> {
         packageCache.refreshIfNeeded()
         val result = mutableListOf<ProcessEntry>()
         val seenPackages = HashSet<String>()
+        val now = System.currentTimeMillis()
+        val myPid = Process.myPid()
 
         // 1. Running App Processes (includes self & visible processes)
         val running = activityManager.runningAppProcesses ?: emptyList()
@@ -579,7 +706,11 @@ class StandardHardwareHelper(
             val pkg = proc.pkgList?.firstOrNull() ?: proc.processName.substringBefore(':')
             seenPackages.add(pkg)
             val meta = packageCache.getMeta(pkg)
-            val pssMb = memInfos?.getOrNull(idx)?.totalPss?.let { it / 1024f }
+            val pssMb = if (proc.pid == myPid) {
+                getSelfPssMb()
+            } else {
+                memInfos?.getOrNull(idx)?.totalPss?.let { it / 1024f }
+            }
             val stateTag = when {
                 proc.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND -> ProcessStateTag.FG
                 proc.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_SERVICE -> ProcessStateTag.SVC
@@ -588,7 +719,6 @@ class StandardHardwareHelper(
             }
             val category = when {
                 meta?.isSystem == true -> ProcessCategory.SYSTEM
-                stateTag == ProcessStateTag.BGD || stateTag == ProcessStateTag.CCH -> ProcessCategory.BACKGROUND
                 else -> ProcessCategory.APPS
             }
             val netBytes = (TrafficStats.getUidRxBytes(proc.uid).coerceAtLeast(0L) +
@@ -609,16 +739,16 @@ class StandardHardwareHelper(
                     oomScoreAdj = null,
                     uptimeSeconds = 0L,
                     isProtected = packageCache.isProtectedPackage(pkg, settings.whitelistPackages),
-                    isFrozenOrStopped = false
+                    isFrozenOrStopped = false,
+                    lastActiveTimestampMs = now
                 )
             )
         }
 
-        // 2. Active recent packages via UsageStatsManager
+        // 2. Active recent packages via UsageStatsManager (PID is hidden by OS -> pid = null, display UID)
         if (hasUsageStatsPermission()) {
-            val end = System.currentTimeMillis()
-            val start = end - 15 * 60 * 1000L
-            val events = usageStatsManager.queryEvents(start, end)
+            val start = now - 15 * 60 * 1000L
+            val events = usageStatsManager.queryEvents(start, now)
             val ev = UsageEvents.Event()
             val recentActive = LinkedHashMap<String, Long>()
             while (events.hasNextEvent()) {
@@ -634,24 +764,25 @@ class StandardHardwareHelper(
                 val meta = packageCache.getMeta(pkg) ?: continue
                 val netBytes = (TrafficStats.getUidRxBytes(meta.uid).coerceAtLeast(0L) +
                     TrafficStats.getUidTxBytes(meta.uid).coerceAtLeast(0L))
-                val isRecent = (end - ts) < 60_000L
+                val isRecent = (now - ts) < 60_000L
                 result.add(
                     ProcessEntry(
-                        pid = meta.uid, // Virtual PID surrogate in Tier 0 when OS hides PID
+                        pid = null, // PID hidden in Tier 0; never substitute UID into PID!
                         ppid = 0,
                         uid = meta.uid,
                         packageName = pkg,
                         displayName = meta.displayName,
-                        category = if (meta.isSystem) ProcessCategory.SYSTEM else if (isRecent) ProcessCategory.APPS else ProcessCategory.BACKGROUND,
+                        category = if (meta.isSystem) ProcessCategory.SYSTEM else ProcessCategory.APPS,
                         stateTag = if (isRecent) ProcessStateTag.BGD else ProcessStateTag.CCH,
                         cpuPercent = null,
                         ramPssMb = null,
                         ramUssMb = null,
                         netBytesTotal = netBytes,
                         oomScoreAdj = null,
-                        uptimeSeconds = ((end - ts) / 1000L).coerceAtLeast(0L),
+                        uptimeSeconds = ((now - ts) / 1000L).coerceAtLeast(0L),
                         isProtected = packageCache.isProtectedPackage(pkg, settings.whitelistPackages),
-                        isFrozenOrStopped = false
+                        isFrozenOrStopped = false,
+                        lastActiveTimestampMs = ts
                     )
                 )
             }

@@ -415,11 +415,17 @@ class ProcPulseMonitorService : Service() {
         if (profiler.isRecording && Build.VERSION.SDK_INT >= 36) {
             val totalSec = if (profiler.targetDurationSec > 0) profiler.targetDurationSec else 3600
             val elapsedSec = ((System.currentTimeMillis() - profiler.startTimeMs) / 1000L).toInt().coerceIn(0, totalSec)
+            val remainingSec = (totalSec - elapsedSec).coerceAtLeast(0)
+            val subText = if (profiler.targetDurationSec > 0) {
+                val remM = remainingSec / 60
+                val remS = remainingSec % 60
+                "Осталось ${remM}м ${remS}с"
+            } else "LIVE"
             val builder = Notification.Builder(this, ProcPulseCoordinator.CHANNEL_PROFILER)
                 .setSmallIcon(R.drawable.ic_notification_pulse)
-                .setContentTitle("Blackbox: ${profiler.title}")
+                .setContentTitle(if (profiler.isLagDiagnostic) "Диагностика лагов: ${profiler.title}" else "Blackbox: ${profiler.title}")
                 .setContentText("$summary • Срезов: ${profiler.samplesRecorded}")
-                .setSubText(if (profiler.targetDurationSec > 0) "${elapsedSec}/${totalSec}с" else "LIVE")
+                .setSubText(subText)
                 .setOngoing(true)
                 .setContentIntent(openIntent)
                 .addAction(Notification.Action.Builder(null, "Стоп", stopPi).build())

@@ -21,10 +21,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -41,6 +39,9 @@ import com.example.procpulse.core.model.OverlayPreset
 import com.example.procpulse.core.model.OverlayWidgetMetric
 import com.example.procpulse.core.model.SystemSnapshot
 import com.example.procpulse.core.ui.PrecisionCard
+import com.example.procpulse.core.ui.PrecisionFilterChip
+import com.example.procpulse.core.ui.PrecisionSlider
+import com.example.procpulse.core.ui.PrecisionSwitch
 import com.example.ui.theme.LocalProcPulsePalette
 import com.example.ui.theme.TnumText
 import java.util.Locale
@@ -80,9 +81,13 @@ fun OverlayToolsScreen(
                             context.startActivity(intent)
                         },
                         shape = RoundedCornerShape(4.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = palette.accent,
+                            contentColor = Color(0xFF09090B)
+                        ),
                         modifier = Modifier.testTag("grant_overlay_permission_btn")
                     ) {
-                        Text("Разрешить поверх других окон", style = TnumText.MicroLabel)
+                        Text("Разрешить поверх других окон", style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold))
                     }
                 }
             }
@@ -100,7 +105,7 @@ fun OverlayToolsScreen(
                         Text("Включить HUD-оверлей", style = TnumText.DataRow.copy(fontWeight = FontWeight.Bold), color = palette.textPrimary)
                         Text("Системное окно с привязкой к FGS (specialUse)", style = TnumText.MicroLabel, color = palette.textMuted)
                     }
-                    Switch(
+                    PrecisionSwitch(
                         checked = config.enabled,
                         enabled = canDrawOverlays,
                         onCheckedChange = { onUpdateConfig(config.copy(enabled = it)) },
@@ -118,7 +123,7 @@ fun OverlayToolsScreen(
                         Text("Pass-through (сквозные касания)", style = TnumText.DataRow, color = palette.textPrimary)
                         Text("Клики проходят сквозь HUD в игру. Отключается из шторки.", style = TnumText.MicroLabel, color = palette.textMuted)
                     }
-                    Switch(
+                    PrecisionSwitch(
                         checked = config.passThrough,
                         onCheckedChange = { onUpdateConfig(config.copy(passThrough = it)) },
                         modifier = Modifier.testTag("hud_passthrough_switch")
@@ -135,7 +140,7 @@ fun OverlayToolsScreen(
                         Text("Прилипание к краям экрана", style = TnumText.DataRow, color = palette.textPrimary)
                         Text("Автовыравнивание при перетаскивании", style = TnumText.MicroLabel, color = palette.textMuted)
                     }
-                    Switch(
+                    PrecisionSwitch(
                         checked = config.snapToEdges,
                         onCheckedChange = { onUpdateConfig(config.copy(snapToEdges = it)) }
                     )
@@ -143,13 +148,22 @@ fun OverlayToolsScreen(
             }
         }
 
-        // Live HUD Preview
+        // Dynamic Live HUD Preview strictly based on selected metrics and real telemetry
         item {
             PrecisionCard(title = "Предпросмотр HUD (${config.preset.label})") {
                 val previewBg = Color(0xFF09090B).copy(alpha = config.backgroundOpacity)
-                val cpuTxt = snapshot?.cpu?.totalUsagePercent?.let { "CPU ${it.toInt()}%" } ?: "CPU 34%"
-                val tempTxt = snapshot?.battery?.tempCelsius?.let { "${"%.1f".format(Locale.US, it)}°C" } ?: "38.2°C"
-                val fpsTxt = snapshot?.fps?.fps?.let { "${it.toInt()} FPS" } ?: "60 FPS"
+                val previewParts = buildPreviewMetricTokens(config, snapshot)
+                val primaryLine = when (config.preset) {
+                    OverlayPreset.SINGLE_LINE -> previewParts.joinToString(" | ").ifEmpty { "Нет выбранных метрик" }
+                    OverlayPreset.CORNER_SPARKLINE -> previewParts.take(3).joinToString(" · ").ifEmpty { "Нет метрик" }
+                    OverlayPreset.GAMING_HUD -> previewParts.take(2).joinToString(" · ").ifEmpty { "Нет метрик" }
+                }
+                val secondaryTokens = when (config.preset) {
+                    OverlayPreset.SINGLE_LINE -> emptyList()
+                    OverlayPreset.CORNER_SPARKLINE -> previewParts.drop(3)
+                    OverlayPreset.GAMING_HUD -> previewParts.drop(2)
+                }
+
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -167,17 +181,14 @@ fun OverlayToolsScreen(
                             .padding(horizontal = 10.dp, vertical = 6.dp)
                     ) {
                         Text(
-                            text = when (config.preset) {
-                                OverlayPreset.SINGLE_LINE -> "$fpsTxt | $cpuTxt | $tempTxt | -420mA"
-                                OverlayPreset.CORNER_SPARKLINE -> "$cpuTxt · $tempTxt · 2.1W"
-                                OverlayPreset.GAMING_HUD -> "$fpsTxt (16.6ms)"
-                            },
+                            text = primaryLine,
                             style = TnumText.DataRow.copy(fontSize = config.fontSizeSp.sp, fontWeight = FontWeight.Bold),
                             color = palette.accent
                         )
-                        if (config.preset != OverlayPreset.SINGLE_LINE) {
+                        if (secondaryTokens.isNotEmpty()) {
+                            Spacer(Modifier.height(2.dp))
                             Text(
-                                text = "RAM 4120/8192M · ↓12K ↑4K",
+                                text = secondaryTokens.joinToString(" · "),
                                 style = TnumText.MicroLabel.copy(fontSize = (config.fontSizeSp - 1).coerceAtLeast(9).sp),
                                 color = Color.White
                             )
@@ -194,10 +205,10 @@ fun OverlayToolsScreen(
                 Spacer(Modifier.height(4.dp))
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     OverlayPreset.entries.forEach { preset ->
-                        FilterChip(
+                        PrecisionFilterChip(
                             selected = config.preset == preset,
                             onClick = { onUpdateConfig(config.copy(preset = preset)) },
-                            label = { Text(preset.label, style = TnumText.MicroLabel) }
+                            label = preset.label
                         )
                     }
                 }
@@ -207,7 +218,7 @@ fun OverlayToolsScreen(
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     OverlayWidgetMetric.entries.forEach { metric ->
                         val active = metric in config.metrics
-                        FilterChip(
+                        PrecisionFilterChip(
                             selected = active,
                             onClick = {
                                 val updated = if (active) config.metrics - metric else config.metrics + metric
@@ -215,32 +226,39 @@ fun OverlayToolsScreen(
                                     onUpdateConfig(config.copy(metrics = updated))
                                 }
                             },
-                            label = { Text(metric.label, style = TnumText.MicroLabel) }
+                            label = metric.label
                         )
                     }
                 }
                 Spacer(Modifier.height(10.dp))
                 Text("Прозрачность фона: ${(config.backgroundOpacity * 100).toInt()}%", style = TnumText.MicroLabel, color = palette.textSecondary)
-                Slider(
+                PrecisionSlider(
                     value = config.backgroundOpacity,
                     onValueChange = { onUpdateConfig(config.copy(backgroundOpacity = it)) },
                     valueRange = 0.25f..1.0f
                 )
+                Spacer(Modifier.height(4.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Размер шрифта HUD: ${config.fontSizeSp}sp", style = TnumText.MicroLabel, color = palette.textSecondary)
+                    Text("Шрифт HUD: ${config.fontSizeSp}sp", style = TnumText.MicroLabel, color = palette.textSecondary)
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         listOf(10, 11, 13, 15).forEach { sz ->
+                            val selected = config.fontSizeSp == sz
                             OutlinedButton(
                                 onClick = { onUpdateConfig(config.copy(fontSizeSp = sz)) },
-                                modifier = Modifier.height(32.dp),
+                                modifier = Modifier.height(34.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                                 shape = RoundedCornerShape(4.dp),
-                                border = BorderStroke(1.dp, if (config.fontSizeSp == sz) palette.accent else palette.border)
+                                border = BorderStroke(1.dp, if (selected) palette.accent else palette.border)
                             ) {
-                                Text("${sz}sp", style = TnumText.MicroLabel)
+                                Text(
+                                    text = "${sz}sp",
+                                    style = TnumText.MicroLabel.copy(fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal),
+                                    color = if (selected) palette.accent else palette.textSecondary
+                                )
                             }
                         }
                     }
@@ -256,6 +274,74 @@ fun OverlayToolsScreen(
                     style = TnumText.MicroLabel,
                     color = palette.textSecondary
                 )
+            }
+        }
+    }
+}
+
+private fun buildPreviewMetricTokens(
+    config: OverlayConfig,
+    snapshot: SystemSnapshot?
+): List<String> {
+    val ordered = listOf(
+        OverlayWidgetMetric.FPS,
+        OverlayWidgetMetric.FRAME_TIME,
+        OverlayWidgetMetric.CPU,
+        OverlayWidgetMetric.TEMP,
+        OverlayWidgetMetric.POWER,
+        OverlayWidgetMetric.RAM_ZRAM,
+        OverlayWidgetMetric.NET,
+        OverlayWidgetMetric.TOP_PROCESS
+    )
+    return ordered.filter { it in config.metrics }.map { metric ->
+        when (metric) {
+            OverlayWidgetMetric.FPS -> {
+                val fps = snapshot?.fps?.takeIf { it.available }?.fps
+                if (fps != null) "${fps.toInt()} FPS" else "-- FPS · Tier 1/2"
+            }
+            OverlayWidgetMetric.FRAME_TIME -> {
+                val ft = snapshot?.fps?.takeIf { it.available }?.frameTimeMs
+                if (ft != null) "${"%.1f".format(Locale.US, ft)}ms" else "-- ms"
+            }
+            OverlayWidgetMetric.CPU -> {
+                val cpu = snapshot?.cpu?.totalUsagePercent
+                if (cpu != null) "CPU ${cpu.toInt()}%" else "CPU --"
+            }
+            OverlayWidgetMetric.TEMP -> {
+                val t = snapshot?.battery?.tempCelsius
+                if (t != null) "${"%.1f".format(Locale.US, t)}°C" else "--°C"
+            }
+            OverlayWidgetMetric.POWER -> {
+                val b = snapshot?.battery
+                if (b != null) "${b.currentMa.toInt()}mA · ${"%.1f".format(Locale.US, b.powerWatts)}W" else "--mA"
+            }
+            OverlayWidgetMetric.RAM_ZRAM -> {
+                val m = snapshot?.memory
+                if (m != null && m.totalMb > 0L) {
+                    val used = (m.totalMb - m.availableMb).coerceAtLeast(0L)
+                    "RAM ${used}/${m.totalMb}M"
+                } else {
+                    "RAM --/--M"
+                }
+            }
+            OverlayWidgetMetric.NET -> {
+                val n = snapshot?.network
+                if (n != null) {
+                    val rxK = (n.wifiRxBytesPerSec + n.cellRxBytesPerSec) / 1024L
+                    val txK = (n.wifiTxBytesPerSec + n.cellTxBytesPerSec) / 1024L
+                    "↓${rxK}K ↑${txK}K"
+                } else {
+                    "↓0K ↑0K"
+                }
+            }
+            OverlayWidgetMetric.TOP_PROCESS -> {
+                val top = snapshot?.topCpuConsumers?.firstOrNull() ?: snapshot?.topRamConsumers?.firstOrNull()
+                if (top != null) {
+                    val pct = top.cpuPercent?.let { " ${it.toInt()}%" } ?: ""
+                    "${top.displayName}$pct"
+                } else {
+                    "Top --"
+                }
             }
         }
     }

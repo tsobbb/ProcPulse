@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -18,20 +19,31 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.LockOpen
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,6 +57,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -94,9 +107,13 @@ fun PrecisionCard(
                 Text(
                     text = title.uppercase(),
                     style = TnumText.SectionHeader,
-                    color = palette.textSecondary
+                    color = palette.textSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
                 )
                 if (trailingBadge != null) {
+                    Spacer(Modifier.width(8.dp))
                     trailingBadge()
                 }
             }
@@ -104,6 +121,132 @@ fun PrecisionCard(
             content()
         }
     }
+}
+
+@Composable
+fun PrecisionFilterChip(
+    selected: Boolean,
+    onClick: () -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
+    val palette = LocalProcPulsePalette.current
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier,
+        shape = RoundedCornerShape(6.dp),
+        colors = FilterChipDefaults.filterChipColors(
+            containerColor = palette.innerSurface,
+            labelColor = palette.textSecondary,
+            selectedContainerColor = palette.accent.copy(alpha = 0.16f),
+            selectedLabelColor = palette.accent,
+            disabledContainerColor = palette.innerSurface.copy(alpha = 0.5f),
+            disabledLabelColor = palette.textMuted
+        ),
+        border = FilterChipDefaults.filterChipBorder(
+            enabled = enabled,
+            selected = selected,
+            borderColor = palette.border,
+            selectedBorderColor = palette.accent.copy(alpha = 0.65f),
+            borderWidth = 1.dp,
+            selectedBorderWidth = 1.dp
+        ),
+        label = {
+            Text(
+                text = label,
+                style = TnumText.MicroLabel.copy(
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                ),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PrecisionSlider(
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    valueRange: ClosedFloatingPointRange<Float>,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
+    val palette = LocalProcPulsePalette.current
+    val inactiveTrack = if (palette.isDark) Color(0xFF27272A) else palette.border
+    val activeTrack = if (enabled) palette.accent else palette.textMuted
+    val thumbCol = if (enabled) palette.accent else palette.textMuted
+
+    Slider(
+        value = value,
+        onValueChange = onValueChange,
+        valueRange = valueRange,
+        enabled = enabled,
+        modifier = modifier.height(32.dp),
+        colors = SliderDefaults.colors(
+            thumbColor = thumbCol,
+            activeTrackColor = activeTrack,
+            inactiveTrackColor = inactiveTrack,
+            activeTickColor = Color.Transparent,
+            inactiveTickColor = Color.Transparent
+        ),
+        thumb = {
+            Box(
+                modifier = Modifier
+                    .size(14.dp)
+                    .clip(CircleShape)
+                    .background(thumbCol)
+                    .border(1.5.dp, palette.background, CircleShape)
+            )
+        },
+        track = { sliderState ->
+            val span = (sliderState.valueRange.endInclusive - sliderState.valueRange.start).coerceAtLeast(0.0001f)
+            val fraction = ((sliderState.value - sliderState.valueRange.start) / span).coerceIn(0f, 1f)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(inactiveTrack)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fraction)
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(activeTrack)
+                )
+            }
+        }
+    )
+}
+
+@Composable
+fun PrecisionSwitch(
+    checked: Boolean,
+    onCheckedChange: ((Boolean) -> Unit)?,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
+    val palette = LocalProcPulsePalette.current
+    Switch(
+        checked = checked,
+        onCheckedChange = onCheckedChange,
+        enabled = enabled,
+        modifier = modifier,
+        colors = SwitchDefaults.colors(
+            checkedThumbColor = if (palette.isDark) Color(0xFF09090B) else Color.White,
+            checkedTrackColor = palette.accent,
+            checkedBorderColor = palette.accent,
+            uncheckedThumbColor = palette.textSecondary,
+            uncheckedTrackColor = if (palette.isDark) Color(0xFF27272A) else palette.innerSurface,
+            uncheckedBorderColor = palette.border
+        )
+    )
 }
 
 @Composable
@@ -149,9 +292,62 @@ fun HonestDegradationBanner(
     shizukuAvailable: Boolean,
     onConnectShizuku: () -> Unit,
     onRequestRoot: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    collapsible: Boolean = true
 ) {
     val palette = LocalProcPulsePalette.current
+    var collapsed by rememberSaveable { mutableStateOf(false) }
+
+    if (collapsible && collapsed) {
+        Row(
+            modifier = modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .background(palette.innerSurface)
+                .border(1.dp, palette.border, RoundedCornerShape(6.dp))
+                .clickable { collapsed = false }
+                .padding(horizontal = 10.dp, vertical = 7.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                Icon(
+                    imageVector = Icons.Outlined.LockOpen,
+                    contentDescription = null,
+                    tint = palette.accent,
+                    modifier = Modifier.size(14.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "TIER 0 (STANDARD) · Права ограничены",
+                    style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold),
+                    color = palette.accent,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "Shizuku",
+                    style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold),
+                    color = palette.textPrimary,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .border(1.dp, palette.accent.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+                        .clickable { onConnectShizuku() }
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+                Icon(
+                    imageVector = Icons.Outlined.ExpandMore,
+                    contentDescription = "Развернуть баннер",
+                    tint = palette.textSecondary,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+        return
+    }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -160,19 +356,42 @@ fun HonestDegradationBanner(
             .border(1.dp, palette.border, RoundedCornerShape(6.dp))
             .padding(10.dp)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = Icons.Outlined.LockOpen,
-                contentDescription = "Ограничение прав Tier 0",
-                tint = palette.accent,
-                modifier = Modifier.size(16.dp)
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = "ОГРАНИЧЕНИЕ TIER 0 (STANDARD)",
-                style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold),
-                color = palette.accent
-            )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                Icon(
+                    imageVector = Icons.Outlined.LockOpen,
+                    contentDescription = "Ограничение прав Tier 0",
+                    tint = palette.accent,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "ОГРАНИЧЕНИЕ TIER 0 (STANDARD)",
+                    style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold),
+                    color = palette.accent
+                )
+            }
+            if (collapsible) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .clickable { collapsed = true }
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Скрыть", style = TnumText.MicroLabel, color = palette.textMuted)
+                    Icon(
+                        imageVector = Icons.Outlined.ExpandLess,
+                        contentDescription = "Свернуть баннер",
+                        tint = palette.textMuted,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            }
         }
         Spacer(modifier = Modifier.height(4.dp))
         Text(
@@ -188,6 +407,7 @@ fun HonestDegradationBanner(
                     .height(34.dp)
                     .testTag("connect_shizuku_button"),
                 shape = RoundedCornerShape(4.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                 border = BorderStroke(1.dp, palette.accent)
             ) {
                 Icon(
@@ -209,6 +429,7 @@ fun HonestDegradationBanner(
                     .height(34.dp)
                     .testTag("request_root_button"),
                 shape = RoundedCornerShape(4.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                 border = BorderStroke(1.dp, palette.border)
             ) {
                 Icon(
@@ -278,7 +499,7 @@ fun PrecisionLineChart(
                 color = if (isScrubbing) palette.accent else palette.textPrimary
             )
             Text(
-                text = "MIN ${"%.0f".format(Locale.US, displaySeries.min)} / MAX ${"%.0f".format(Locale.US, displaySeries.max)}$unitSuffix",
+                text = "MIN ${"%.1f".format(Locale.US, displaySeries.min)} / MAX ${"%.1f".format(Locale.US, displaySeries.max)}$unitSuffix",
                 style = TnumText.MicroLabel,
                 color = palette.textMuted
             )
@@ -355,12 +576,10 @@ fun PrecisionLineChart(
                 val h = size.height
                 val gridStroke = 1.dp.toPx()
 
-                // Horizontal gridlines (25%, 50%, 75%)
                 for (i in 1..3) {
                     val y = h * (i / 4f)
                     drawLine(gridColor, Offset(0f, y), Offset(w, y), strokeWidth = gridStroke)
                 }
-                // Vertical gridlines
                 for (i in 1..4) {
                     val x = w * (i / 5f)
                     drawLine(gridColor, Offset(x, 0f), Offset(x, h), strokeWidth = gridStroke)
@@ -419,7 +638,7 @@ fun SegmentedMemoryBar(
     val safeTotal = totalMb.coerceAtLeast(1L).toFloat()
     val wAnon = (appAnonMb / safeTotal).coerceIn(0.01f, 1f)
     val wCached = (cachedMb / safeTotal).coerceIn(0f, 1f)
-    val wSlab = (kernelSlabMb / safeTotal).coerceIn(0f, 1f)
+    val wOther = (kernelSlabMb / safeTotal).coerceIn(0f, 1f)
     val wFree = (freeMb / safeTotal).coerceIn(0.01f, 1f)
 
     Column(modifier = modifier.fillMaxWidth()) {
@@ -432,7 +651,7 @@ fun SegmentedMemoryBar(
         ) {
             Box(Modifier.weight(wAnon).height(10.dp).background(palette.accent))
             if (wCached > 0f) Box(Modifier.weight(wCached).height(10.dp).background(MemoryCyan))
-            if (wSlab > 0f) Box(Modifier.weight(wSlab).height(10.dp).background(MemoryPurple))
+            if (wOther > 0f) Box(Modifier.weight(wOther).height(10.dp).background(MemoryPurple))
             Box(Modifier.weight(wFree).height(10.dp).background(palette.innerSurface))
         }
         Spacer(modifier = Modifier.height(6.dp))
@@ -440,10 +659,10 @@ fun SegmentedMemoryBar(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            LegendDot("App $appAnonMb MB", palette.accent)
-            LegendDot("Cache $cachedMb MB", MemoryCyan)
-            LegendDot("Slab $kernelSlabMb MB", MemoryPurple)
-            LegendDot("Free $freeMb MB", palette.textMuted)
+            LegendDot("App $appAnonMb", palette.accent)
+            LegendDot("Cache $cachedMb", MemoryCyan)
+            LegendDot("Other $kernelSlabMb", MemoryPurple)
+            LegendDot("Free $freeMb", palette.textMuted)
         }
     }
 }

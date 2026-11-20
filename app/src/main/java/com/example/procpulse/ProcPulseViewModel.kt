@@ -1,24 +1,28 @@
 package com.example.procpulse
 
 import android.app.Application
-import android.app.usage.UsageStatsManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.procpulse.core.bridge.CachedAppMeta
 import com.example.procpulse.core.bridge.ProcessActionOutcome
+import com.example.procpulse.core.database.LagReportAnalyzer
 import com.example.procpulse.core.database.ProfilerSampleEntity
 import com.example.procpulse.core.database.ProfilerSessionEntity
 import com.example.procpulse.core.database.WatchdogEventEntity
 import com.example.procpulse.core.model.AccentPreset
 import com.example.procpulse.core.model.AppSettings
+import com.example.procpulse.core.model.CapabilityTier
 import com.example.procpulse.core.model.ChartSeriesSnapshot
 import com.example.procpulse.core.model.CurrentCalibrationMode
+import com.example.procpulse.core.model.LagRootCauseReport
 import com.example.procpulse.core.model.LogcatEntry
 import com.example.procpulse.core.model.OverlayConfig
 import com.example.procpulse.core.model.PreferredTierMode
@@ -26,6 +30,7 @@ import com.example.procpulse.core.model.ProcessCategory
 import com.example.procpulse.core.model.ProcessDetail
 import com.example.procpulse.core.model.ProcessEntry
 import com.example.procpulse.core.model.ProcessSortBy
+import com.example.procpulse.core.model.ProcessStateTag
 import com.example.procpulse.core.model.SocketConnection
 import com.example.procpulse.core.model.SystemSnapshot
 import com.example.procpulse.core.model.ThemeMode
@@ -83,12 +88,13 @@ class ProcPulseViewModel(application: Application) : AndroidViewModel(applicatio
     private val _filterInMemory = MutableStateFlow(false)
     val filterInMemory: StateFlow<Boolean> = _filterInMemory.asStateFlow()
 
-    private val _sortBy = MutableStateFlow(ProcessSortBy.CPU)
+    private val _sortBy = MutableStateFlow(ProcessSortBy.RECENT)
     val sortBy: StateFlow<ProcessSortBy> = _sortBy.asStateFlow()
+    private var userChangedSort = false
 
     private val _rawProcesses = MutableStateFlow<List<ProcessEntry>>(emptyList())
-    private val _selectedPids = MutableStateFlow<Set<Int>>(emptySet())
-    val selectedPids: StateFlow<Set<Int>> = _selectedPids.asStateFlow()
+    private val _selectedKeys = MutableStateFlow<Set<String>>(emptySet())
+    val selectedKeys: StateFlow<Set<String>> = _selectedKeys.asStateFlow()
 
     private val debouncedQuery = _searchQuery.debounce(100L)
 
@@ -111,11 +117,19 @@ class ProcPulseViewModel(application: Application) : AndroidViewModel(applicatio
         val sort = arr[6] as ProcessSortBy
 
         val filtered = list.filter { p ->
-            val catMatch = p.category == cat
+            val catMatch = when (cat) {
+                ProcessCategory.BACKGROUND -> !p.isFrozenOrStopped && (
+                    p.category == ProcessCategory.BACKGROUND ||
+                        p.stateTag == ProcessStateTag.BGD ||
+                        p.stateTag == ProcessStateTag.CCH ||
+                        (p.oomScoreAdj ?: 0) >= 500
+                    )
+                else -> p.category == cat
+            }
             val queryMatch = q.isEmpty() ||
                 p.displayName.lowercase().contains(q) ||
                 p.packageName.lowercase().contains(q) ||
-                p.pid.toString().contains(q) ||
+                (p.pid?.toString()?.contains(q) == true) ||
                 p.uid.toString().contains(q)
             val cpuMatch = !cpuOnly || (p.cpuPercent ?: 0f) > 0f
             val netMatch = !netOnly || p.netBytesTotal > 0L
@@ -126,9 +140,10 @@ class ProcPulseViewModel(application: Application) : AndroidViewModel(applicatio
         when (sort) {
             ProcessSortBy.CPU -> filtered.sortedWith(compareByDescending<ProcessEntry> { it.cpuPercent ?: -1f }.thenByDescending { it.ramPssMb ?: -1f })
             ProcessSortBy.RAM -> filtered.sortedByDescending { it.ramPssMb ?: -1f }
+            ProcessSortBy.RECENT -> filtered.sortedWith(compareByDescending<ProcessEntry> { it.lastActiveTimestampMs }.thenByDescending { it.ramPssMb ?: -1f })
             ProcessSortBy.NETWORK -> filtered.sortedByDescending { it.netBytesTotal }
             ProcessSortBy.OOM -> filtered.sortedBy { it.oomScoreAdj ?: Int.MAX_VALUE }
-            ProcessSortBy.PID -> filtered.sortedBy { it.pid }
+            ProcessSortBy.PID -> filtered.sortedBy { it.pid ?: Int.MAX_VALUE }
             ProcessSortBy.UPTIME -> filtered.sortedByDescending { it.uptimeSeconds }
             ProcessSortBy.NAME -> filtered.sortedBy { it.displayName.lowercase() }
         }
@@ -169,25 +184,83 @@ class ProcPulseViewModel(application: Application) : AndroidViewModel(applicatio
     private val _selectedSessionSamples = MutableStateFlow<List<ProfilerSampleEntity>>(emptyList())
     val selectedSessionSamples: StateFlow<List<ProfilerSampleEntity>> = _selectedSessionSamples.asStateFlow()
 
+    private val _selectedLagReport = MutableStateFlow<LagRootCauseReport?>(null)
+    val selectedLagReport: StateFlow<LagRootCauseReport?> = _selectedLagReport.asStateFlow()
+
     private val _actionMessage = MutableStateFlow<String?>(null)
     val actionMessage: StateFlow<String?> = _actionMessage.asStateFlow()
 
     private var processLoopJob: Job? = null
     private var inspectorLoopJob: Job? = null
     private var sessionObserveJob: Job? = null
+    private var isProcessesTabActive = false
 
     init {
+        // Adapt default sort automatically when Tier changes unless user manually overrode sort
         viewModelScope.launch {
             snapshot.collect { snap ->
-                if (snap != null) {
-                    refreshProcessListOnce()
+                if (snap != null && !userChangedSort) {
+                    val target = if (snap.tier == CapabilityTier.STANDARD) ProcessSortBy.RECENT else ProcessSortBy.CPU
+                    if (_sortBy.value != target) {
+                        _sortBy.value = target
+                    }
+                }
+            }
+        }
+        // Automatically select and open report when 1-click lag diagnostic finishes
+        viewModelScope.launch {
+            coordinator.lastCompletedLagSessionId.collect { sid ->
+                if (sid != null) {
+                    selectSessionForAnalysis(sid)
+                    _actionMessage.value = "Диагностика лагов завершена — отчёт сформирован"
+                }
+            }
+        }
+        // Recompute LagRootCauseReport on Dispatchers.Default when session samples update
+        viewModelScope.launch {
+            combine(_selectedSessionId, sessions, _selectedSessionSamples) { sid, sessList, samples ->
+                Triple(sid, sessList.firstOrNull { it.id == sid }, samples)
+            }.collect { (_, session, samples) ->
+                if (session != null && samples.isNotEmpty()) {
+                    val report = withContext(Dispatchers.Default) {
+                        LagReportAnalyzer.analyze(session, samples)
+                    }
+                    _selectedLagReport.value = report
+                } else {
+                    _selectedLagReport.value = null
                 }
             }
         }
     }
 
     fun onUiStarted() = coordinator.onUiStarted()
-    fun onUiStopped() = coordinator.onUiStopped()
+    fun onUiStopped() {
+        coordinator.onUiStopped()
+        processLoopJob?.cancel()
+        processLoopJob = null
+    }
+
+    fun setActiveScreenContext(isMonitor: Boolean, isProcesses: Boolean) {
+        coordinator.setMonitorTabVisible(isMonitor)
+        isProcessesTabActive = isProcesses
+        if (isProcesses) {
+            startProcessesPollingIfNeeded()
+        } else {
+            processLoopJob?.cancel()
+            processLoopJob = null
+        }
+    }
+
+    private fun startProcessesPollingIfNeeded() {
+        if (processLoopJob?.isActive == true) return
+        processLoopJob = viewModelScope.launch {
+            while (isActive && isProcessesTabActive) {
+                val list = bridge.collectProcesses(settings.value, null)
+                _rawProcesses.value = list
+                delay(2_500L)
+            }
+        }
+    }
 
     fun togglePause() = coordinator.togglePause()
 
@@ -195,7 +268,16 @@ class ProcPulseViewModel(application: Application) : AndroidViewModel(applicatio
         _actionMessage.value = null
     }
 
-    fun getAppIcon(packageName: String): ImageBitmap? = bridge.packageCache.getAppIcon(packageName)
+    fun getCachedAppIcon(packageName: String): ImageBitmap? =
+        bridge.packageCache.getCachedIcon(packageName)
+
+    suspend fun loadAppIcon(packageName: String): ImageBitmap? = withContext(Dispatchers.IO) {
+        bridge.packageCache.loadAppIconSync(packageName)
+    }
+
+    suspend fun getAllInstalledApps(): List<CachedAppMeta> = withContext(Dispatchers.IO) {
+        bridge.packageCache.getAllApps()
+    }
 
     fun hasUsageStatsPermission(): Boolean = bridge.hardwareHelper.hasUsageStatsPermission()
 
@@ -215,30 +297,35 @@ class ProcPulseViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun selectCategory(cat: ProcessCategory) {
         _selectedCategory.value = cat
-        _selectedPids.value = emptySet()
+        _selectedKeys.value = emptySet()
     }
 
     fun setSearchQuery(q: String) { _searchQuery.value = q }
     fun toggleFilterCpu() { _filterCpuNonZero.value = !_filterCpuNonZero.value }
     fun toggleFilterNet() { _filterActiveNet.value = !_filterActiveNet.value }
     fun toggleFilterMem() { _filterInMemory.value = !_filterInMemory.value }
-    fun setSortBy(sort: ProcessSortBy) { _sortBy.value = sort }
-
-    fun toggleSelectPid(pid: Int) {
-        val current = _selectedPids.value
-        _selectedPids.value = if (pid in current) current - pid else current + pid
+    fun setSortBy(sort: ProcessSortBy) {
+        userChangedSort = true
+        _sortBy.value = sort
     }
 
-    fun clearSelectedPids() { _selectedPids.value = emptySet() }
+    fun toggleSelectProcess(entry: ProcessEntry) {
+        val key = entry.processKey()
+        val current = _selectedKeys.value
+        _selectedKeys.value = if (key in current) current - key else current + key
+    }
+
+    fun clearSelectedProcesses() { _selectedKeys.value = emptySet() }
 
     fun batchActionForceStop() {
         viewModelScope.launch {
-            val targets = _rawProcesses.value.filter { it.pid in _selectedPids.value && !it.isProtected }
+            val sel = _selectedKeys.value
+            val targets = _rawProcesses.value.filter { it.processKey() in sel && !it.isProtected }
             var ok = 0
             for (t in targets) {
                 if (bridge.forceStop(t.packageName).success) ok++
             }
-            _selectedPids.value = emptySet()
+            _selectedKeys.value = emptySet()
             _actionMessage.value = "Force Stop выполнен для $ok процессов (защищённые пропущены)"
             refreshProcessListOnce()
         }
@@ -246,12 +333,13 @@ class ProcPulseViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun batchActionFreeze() {
         viewModelScope.launch {
-            val targets = _rawProcesses.value.filter { it.pid in _selectedPids.value && !it.isProtected }
+            val sel = _selectedKeys.value
+            val targets = _rawProcesses.value.filter { it.processKey() in sel && !it.isProtected }
             var ok = 0
             for (t in targets) {
                 if (bridge.setFreeze(t.packageName, true).success) ok++
             }
-            _selectedPids.value = emptySet()
+            _selectedKeys.value = emptySet()
             _actionMessage.value = "Заморожено пакетов: $ok"
             refreshProcessListOnce()
         }
@@ -259,11 +347,12 @@ class ProcPulseViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun batchAddToWhitelist() {
         viewModelScope.launch {
-            val targets = _rawProcesses.value.filter { it.pid in _selectedPids.value }
+            val sel = _selectedKeys.value
+            val targets = _rawProcesses.value.filter { it.processKey() in sel }
             for (t in targets) {
                 settingsRepo.addToWhitelist(t.packageName)
             }
-            _selectedPids.value = emptySet()
+            _selectedKeys.value = emptySet()
             _actionMessage.value = "Добавлено в Whitelist: ${targets.size}"
             refreshProcessListOnce()
         }
@@ -278,7 +367,7 @@ class ProcPulseViewModel(application: Application) : AndroidViewModel(applicatio
             while (isActive) {
                 val detail = bridge.collectProcessDetail(entry, settings.value)
                 _inspectedDetail.value = detail
-                if (!_logcatPaused.value) {
+                if (!_logcatPaused.value && entry.pid != null) {
                     _logcatEntries.value = bridge.collectLogcat(entry.pid, 200)
                 }
                 delay(1500L)
@@ -364,9 +453,18 @@ class ProcPulseViewModel(application: Application) : AndroidViewModel(applicatio
     fun setCurrentCalibration(mode: CurrentCalibrationMode) { viewModelScope.launch { settingsRepo.setCurrentCalibrationMode(mode) } }
     fun setStartWatchdogOnBoot(enabled: Boolean) { viewModelScope.launch { settingsRepo.setStartWatchdogOnBoot(enabled) } }
 
-    fun addToWhitelist(pkg: String) { viewModelScope.launch { settingsRepo.addToWhitelist(pkg) } }
+    fun addToWhitelist(pkg: String) {
+        val clean = pkg.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch { settingsRepo.addToWhitelist(clean) }
+    }
+
     fun removeFromWhitelist(pkg: String) { viewModelScope.launch { settingsRepo.removeFromWhitelist(pkg) } }
-    fun toggleBlacklist(pkg: String) { viewModelScope.launch { settingsRepo.toggleBlacklist(pkg) } }
+    fun toggleBlacklist(pkg: String) {
+        val clean = pkg.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch { settingsRepo.toggleBlacklist(clean) }
+    }
 
     fun updateOverlayConfig(cfg: OverlayConfig) {
         viewModelScope.launch {
@@ -390,14 +488,28 @@ class ProcPulseViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun startProfiler(title: String, intervalMs: Long, durationSec: Int) {
         viewModelScope.launch {
-            coordinator.startProfilerSession(title, intervalMs, durationSec)
+            coordinator.startProfilerSession(title, intervalMs, durationSec, isLagDiagnostic = false)
             _actionMessage.value = "Запись Blackbox запущена"
+        }
+    }
+
+    fun startLagDiagnosticPreset(durationSec: Int = 180) {
+        viewModelScope.launch {
+            coordinator.startProfilerSession(
+                title = "Диагностика лагов (${durationSec / 60} мин)",
+                intervalMs = 2000L,
+                targetDurationSec = durationSec,
+                isLagDiagnostic = true
+            )
+            _actionMessage.value = "Запущена 1-клик диагностика лагов (2с интервал). Откройте проблемное приложение и вернитесь по завершении."
         }
     }
 
     fun stopProfiler() {
         viewModelScope.launch {
+            val sid = profilerState.value.sessionId
             coordinator.stopProfilerSession()
+            if (sid != null) selectSessionForAnalysis(sid)
             _actionMessage.value = "Сессия Blackbox сохранена"
         }
     }
@@ -407,6 +519,7 @@ class ProcPulseViewModel(application: Application) : AndroidViewModel(applicatio
         sessionObserveJob?.cancel()
         if (sessionId == null) {
             _selectedSessionSamples.value = emptyList()
+            _selectedLagReport.value = null
             return
         }
         sessionObserveJob = viewModelScope.launch {
@@ -427,12 +540,18 @@ class ProcPulseViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch { profilerRepo.clearWatchdogEvents() }
     }
 
+    fun copyTextToClipboard(label: String, content: String) {
+        val cm = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText(label, content))
+        _actionMessage.value = "Отчёт скопирован в буфер обмена"
+    }
+
     suspend fun generateSessionCsv(sessionId: Long): String = profilerRepo.exportSessionAsCsv(sessionId)
     suspend fun generateSessionJson(sessionId: Long): String = profilerRepo.exportSessionAsJson(sessionId)
 
     fun buildProcessDiagnosticJson(detail: ProcessDetail): String {
         return org.json.JSONObject().apply {
-            put("pid", detail.entry.pid)
+            put("pid", detail.entry.pid ?: org.json.JSONObject.NULL)
             put("ppid", detail.entry.ppid)
             put("uid", detail.entry.uid)
             put("packageName", detail.entry.packageName)
@@ -457,7 +576,7 @@ class ProcPulseViewModel(application: Application) : AndroidViewModel(applicatio
     fun buildProcessDiagnosticMarkdown(detail: ProcessDetail): String = buildString {
         appendLine("# ProcPulse Diagnostic: ${detail.entry.displayName}")
         appendLine("- **Package:** `${detail.entry.packageName}`")
-        appendLine("- **PID / PPID / UID:** ${detail.entry.pid} / ${detail.entry.ppid} / ${detail.entry.uid}")
+        appendLine("- **PID / PPID / UID:** ${detail.entry.pid ?: "N/A"} / ${detail.entry.ppid} / ${detail.entry.uid}")
         appendLine("- **State:** ${detail.entry.stateTag.tag} | **Standby:** ${detail.standbyBucket}")
         appendLine("- **CPU:** ${detail.entry.cpuPercent?.let { "%.1f%%".format(it) } ?: "N/A"}")
         appendLine("- **Memory (PSS / USS / RSS / Swap):** ${detail.pssMb?.let { "%.1f".format(it) } ?: "--"} / ${detail.ussMb?.let { "%.1f".format(it) } ?: "--"} / ${detail.rssMb?.let { "%.1f".format(it) } ?: "--"} / ${detail.swapZramMb?.let { "%.1f".format(it) } ?: "--"} MB")

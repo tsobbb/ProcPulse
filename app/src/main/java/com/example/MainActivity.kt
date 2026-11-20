@@ -37,8 +37,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -172,7 +174,7 @@ fun ProcPulseRootShell(viewModel: ProcPulseViewModel) {
     val filterNet by viewModel.filterActiveNet.collectAsStateWithLifecycle()
     val filterMem by viewModel.filterInMemory.collectAsStateWithLifecycle()
     val sortBy by viewModel.sortBy.collectAsStateWithLifecycle()
-    val selectedPids by viewModel.selectedPids.collectAsStateWithLifecycle()
+    val selectedKeys by viewModel.selectedKeys.collectAsStateWithLifecycle()
 
     val inspectedEntry by viewModel.inspectedEntry.collectAsStateWithLifecycle()
     val inspectedDetail by viewModel.inspectedDetail.collectAsStateWithLifecycle()
@@ -185,6 +187,7 @@ fun ProcPulseRootShell(viewModel: ProcPulseViewModel) {
     val sessions by viewModel.sessions.collectAsStateWithLifecycle()
     val selectedSessionId by viewModel.selectedSessionId.collectAsStateWithLifecycle()
     val selectedSamples by viewModel.selectedSessionSamples.collectAsStateWithLifecycle()
+    val selectedLagReport by viewModel.selectedLagReport.collectAsStateWithLifecycle()
     val watchdogEvents by viewModel.watchdogEvents.collectAsStateWithLifecycle()
     val actionMessage by viewModel.actionMessage.collectAsStateWithLifecycle()
 
@@ -198,6 +201,29 @@ fun ProcPulseRootShell(viewModel: ProcPulseViewModel) {
     var currentTab by rememberSaveable { mutableStateOf(MainTab.MONITOR) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
 
+    // Tell Coordinator/ViewModel which heavy polling tabs are active so background tabs stay idle
+    LaunchedEffect(currentTab, showSettings) {
+        viewModel.setActiveScreenContext(
+            isMonitor = !showSettings && currentTab == MainTab.MONITOR,
+            isProcesses = !showSettings && currentTab == MainTab.PROCESSES
+        )
+    }
+
+    val navItemColors = NavigationBarItemDefaults.colors(
+        selectedIconColor = palette.accent,
+        selectedTextColor = palette.accent,
+        indicatorColor = palette.accent.copy(alpha = 0.16f),
+        unselectedIconColor = palette.textSecondary,
+        unselectedTextColor = palette.textSecondary
+    )
+    val railItemColors = NavigationRailItemDefaults.colors(
+        selectedIconColor = palette.accent,
+        selectedTextColor = palette.accent,
+        indicatorColor = palette.accent.copy(alpha = 0.16f),
+        unselectedIconColor = palette.textSecondary,
+        unselectedTextColor = palette.textSecondary
+    )
+
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
@@ -210,43 +236,45 @@ fun ProcPulseRootShell(viewModel: ProcPulseViewModel) {
             snackbarHost = { SnackbarHost(snackbarHostState) },
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             topBar = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(palette.card)
-                        .windowInsetsPadding(WindowInsets.statusBars)
-                ) {
-                    Row(
+                if (!showSettings) {
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                            .background(palette.card)
+                            .windowInsetsPadding(WindowInsets.statusBars)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = "PROCPULSE",
-                                style = TnumText.SectionHeader.copy(fontWeight = FontWeight.Bold),
-                                color = palette.accent
-                            )
-                            Spacer(Modifier.width(10.dp))
-                            TierBadge(
-                                tier = snapshot?.tier ?: CapabilityTier.STANDARD,
-                                onClick = { showSettings = true }
-                            )
-                        }
-                        IconButton(
-                            onClick = { showSettings = !showSettings },
-                            modifier = Modifier.testTag("open_settings_btn")
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = Icons.Outlined.Settings,
-                                contentDescription = "Настройки",
-                                tint = if (showSettings) palette.accent else palette.textPrimary
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "PROCPULSE",
+                                    style = TnumText.SectionHeader.copy(fontWeight = FontWeight.Bold),
+                                    color = palette.accent
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                TierBadge(
+                                    tier = snapshot?.tier ?: CapabilityTier.STANDARD,
+                                    onClick = { showSettings = true }
+                                )
+                            }
+                            IconButton(
+                                onClick = { showSettings = true },
+                                modifier = Modifier.testTag("open_settings_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Settings,
+                                    contentDescription = "Настройки",
+                                    tint = palette.textPrimary
+                                )
+                            }
                         }
+                        HorizontalDivider(color = palette.border)
                     }
-                    HorizontalDivider(color = palette.border)
                 }
             },
             bottomBar = {
@@ -269,6 +297,7 @@ fun ProcPulseRootShell(viewModel: ProcPulseViewModel) {
                                         currentTab = tab
                                         showSettings = false
                                     },
+                                    colors = navItemColors,
                                     icon = { Icon(tab.icon, contentDescription = tab.label) },
                                     label = { Text(tab.label, style = TnumText.MicroLabel) },
                                     modifier = Modifier.testTag("nav_${tab.name.lowercase()}")
@@ -296,6 +325,7 @@ fun ProcPulseRootShell(viewModel: ProcPulseViewModel) {
                                     currentTab = tab
                                     showSettings = false
                                 },
+                                colors = railItemColors,
                                 icon = { Icon(tab.icon, contentDescription = tab.label) },
                                 label = { Text(tab.label, style = TnumText.MicroLabel) },
                                 modifier = Modifier.testTag("rail_${tab.name.lowercase()}")
@@ -311,6 +341,7 @@ fun ProcPulseRootShell(viewModel: ProcPulseViewModel) {
                             settings = settings,
                             snapshot = snapshot,
                             isBatteryOptIgnored = viewModel.isBatteryOptimizationIgnored(),
+                            loadInstalledApps = viewModel::getAllInstalledApps,
                             onBack = { showSettings = false },
                             onSelectTheme = viewModel::setThemeMode,
                             onSelectAccent = viewModel::setAccentPreset,
@@ -320,8 +351,9 @@ fun ProcPulseRootShell(viewModel: ProcPulseViewModel) {
                             onInvertCurrent = viewModel::setInvertCurrent,
                             onSelectCalibration = viewModel::setCurrentCalibration,
                             onBootWatchdogToggle = viewModel::setStartWatchdogOnBoot,
+                            onAddWhitelist = viewModel::addToWhitelist,
                             onRemoveWhitelist = viewModel::removeFromWhitelist,
-                            onRemoveBlacklist = viewModel::toggleBlacklist
+                            onToggleBlacklist = viewModel::toggleBlacklist
                         )
                     } else if (!isWideScreen && inspectedEntry != null) {
                         InspectorScreen(
@@ -356,12 +388,14 @@ fun ProcPulseRootShell(viewModel: ProcPulseViewModel) {
                             onLogcatLevelChange = viewModel::setLogcatLevel,
                             onLogcatFilterChange = viewModel::setLogcatFilter,
                             onExportJson = { det ->
+                                val idTag = det.entry.pid?.let { "pid$it" } ?: "uid${det.entry.uid}"
                                 pendingExportText = viewModel.buildProcessDiagnosticJson(det)
-                                exportLauncher.launch("${det.entry.packageName}_pid${det.entry.pid}.json")
+                                exportLauncher.launch("${det.entry.packageName}_$idTag.json")
                             },
                             onExportMarkdown = { det ->
+                                val idTag = det.entry.pid?.let { "pid$it" } ?: "uid${det.entry.uid}"
                                 pendingExportText = viewModel.buildProcessDiagnosticMarkdown(det)
-                                exportLauncher.launch("${det.entry.packageName}_pid${det.entry.pid}.md")
+                                exportLauncher.launch("${det.entry.packageName}_$idTag.md")
                             },
                             onExportLogcat = { pkg, logs ->
                                 pendingExportText = logs.joinToString("\n") { it.rawLine }
@@ -407,17 +441,18 @@ fun ProcPulseRootShell(viewModel: ProcPulseViewModel) {
                                                 filterActiveNet = filterNet,
                                                 filterInMemory = filterMem,
                                                 sortBy = sortBy,
-                                                selectedPids = selectedPids,
-                                                inspectedPid = inspectedEntry?.pid,
-                                                getAppIcon = viewModel::getAppIcon,
+                                                selectedKeys = selectedKeys,
+                                                inspectedKey = inspectedEntry?.processKey(),
+                                                getCachedAppIcon = viewModel::getCachedAppIcon,
+                                                loadAppIcon = viewModel::loadAppIcon,
                                                 onSelectCategory = viewModel::selectCategory,
                                                 onSearchQueryChange = viewModel::setSearchQuery,
                                                 onToggleFilterCpu = viewModel::toggleFilterCpu,
                                                 onToggleFilterNet = viewModel::toggleFilterNet,
                                                 onToggleFilterMem = viewModel::toggleFilterMem,
                                                 onSelectSort = viewModel::setSortBy,
-                                                onToggleSelectPid = viewModel::toggleSelectPid,
-                                                onClearSelection = viewModel::clearSelectedPids,
+                                                onToggleSelectProcess = viewModel::toggleSelectProcess,
+                                                onClearSelection = viewModel::clearSelectedProcesses,
                                                 onBatchForceStop = viewModel::batchActionForceStop,
                                                 onBatchFreeze = viewModel::batchActionFreeze,
                                                 onBatchWhitelist = viewModel::batchAddToWhitelist,
@@ -460,12 +495,14 @@ fun ProcPulseRootShell(viewModel: ProcPulseViewModel) {
                                                 onLogcatLevelChange = viewModel::setLogcatLevel,
                                                 onLogcatFilterChange = viewModel::setLogcatFilter,
                                                 onExportJson = { det ->
+                                                    val idTag = det.entry.pid?.let { "pid$it" } ?: "uid${det.entry.uid}"
                                                     pendingExportText = viewModel.buildProcessDiagnosticJson(det)
-                                                    exportLauncher.launch("${det.entry.packageName}_pid${det.entry.pid}.json")
+                                                    exportLauncher.launch("${det.entry.packageName}_$idTag.json")
                                                 },
                                                 onExportMarkdown = { det ->
+                                                    val idTag = det.entry.pid?.let { "pid$it" } ?: "uid${det.entry.uid}"
                                                     pendingExportText = viewModel.buildProcessDiagnosticMarkdown(det)
-                                                    exportLauncher.launch("${det.entry.packageName}_pid${det.entry.pid}.md")
+                                                    exportLauncher.launch("${det.entry.packageName}_$idTag.md")
                                                 },
                                                 onExportLogcat = { pkg, logs ->
                                                     pendingExportText = logs.joinToString("\n") { it.rawLine }
@@ -486,17 +523,18 @@ fun ProcPulseRootShell(viewModel: ProcPulseViewModel) {
                                         filterActiveNet = filterNet,
                                         filterInMemory = filterMem,
                                         sortBy = sortBy,
-                                        selectedPids = selectedPids,
-                                        inspectedPid = inspectedEntry?.pid,
-                                        getAppIcon = viewModel::getAppIcon,
+                                        selectedKeys = selectedKeys,
+                                        inspectedKey = inspectedEntry?.processKey(),
+                                        getCachedAppIcon = viewModel::getCachedAppIcon,
+                                        loadAppIcon = viewModel::loadAppIcon,
                                         onSelectCategory = viewModel::selectCategory,
                                         onSearchQueryChange = viewModel::setSearchQuery,
                                         onToggleFilterCpu = viewModel::toggleFilterCpu,
                                         onToggleFilterNet = viewModel::toggleFilterNet,
                                         onToggleFilterMem = viewModel::toggleFilterMem,
                                         onSelectSort = viewModel::setSortBy,
-                                        onToggleSelectPid = viewModel::toggleSelectPid,
-                                        onClearSelection = viewModel::clearSelectedPids,
+                                        onToggleSelectProcess = viewModel::toggleSelectProcess,
+                                        onClearSelection = viewModel::clearSelectedProcesses,
                                         onBatchForceStop = viewModel::batchActionForceStop,
                                         onBatchFreeze = viewModel::batchActionFreeze,
                                         onBatchWhitelist = viewModel::batchAddToWhitelist,
@@ -519,9 +557,11 @@ fun ProcPulseRootShell(viewModel: ProcPulseViewModel) {
                                 sessions = sessions,
                                 selectedSessionId = selectedSessionId,
                                 selectedSamples = selectedSamples,
+                                selectedLagReport = selectedLagReport,
                                 watchdogConfig = settings.watchdogConfig,
                                 watchdogEvents = watchdogEvents,
                                 onStartRecording = viewModel::startProfiler,
+                                onStartLagDiagnostic = viewModel::startLagDiagnosticPreset,
                                 onStopRecording = viewModel::stopProfiler,
                                 onSelectSession = viewModel::selectSessionForAnalysis,
                                 onDeleteSession = viewModel::deleteSession,
@@ -536,6 +576,9 @@ fun ProcPulseRootShell(viewModel: ProcPulseViewModel) {
                                         pendingExportText = viewModel.generateSessionJson(sid)
                                         exportLauncher.launch("procpulse_session_$sid.json")
                                     }
+                                },
+                                onCopyReportMarkdown = { md ->
+                                    viewModel.copyTextToClipboard("ProcPulse Lag Report", md)
                                 },
                                 onUpdateWatchdog = viewModel::updateWatchdogConfig,
                                 onClearWatchdogEvents = viewModel::clearWatchdogEvents

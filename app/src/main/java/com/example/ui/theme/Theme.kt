@@ -77,19 +77,52 @@ fun ProcPulseTheme(
 
     val baseScheme = if (useDynamic) {
         val dyn = if (isDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        val accent = dyn.primary
         if (isDark) {
             dyn.copy(
+                primaryContainer = accent.copy(alpha = 0.16f),
+                onPrimaryContainer = accent,
+                secondaryContainer = accent.copy(alpha = 0.16f),
+                onSecondaryContainer = accent,
+                tertiaryContainer = DarkSurfaceInner,
+                onTertiaryContainer = DarkTextPrimary,
                 background = DarkBackground,
+                onBackground = DarkTextPrimary,
                 surface = DarkSurfaceCard,
+                onSurface = DarkTextPrimary,
                 surfaceVariant = DarkSurfaceInner,
-                outline = DarkBorder
+                onSurfaceVariant = DarkTextSecondary,
+                surfaceContainerLowest = DarkBackground,
+                surfaceContainerLow = DarkSurfaceCard,
+                surfaceContainer = DarkSurfaceInner,
+                surfaceContainerHigh = Color(0xFF1E1E22),
+                surfaceContainerHighest = DarkBorder,
+                surfaceTint = Color.Transparent,
+                outline = DarkBorder,
+                outlineVariant = DarkBorder
             )
         } else {
             dyn.copy(
+                primaryContainer = accent.copy(alpha = 0.16f),
+                onPrimaryContainer = accent,
+                secondaryContainer = accent.copy(alpha = 0.16f),
+                onSecondaryContainer = accent,
+                tertiaryContainer = LightSurfaceInner,
+                onTertiaryContainer = LightTextPrimary,
                 background = LightBackground,
+                onBackground = LightTextPrimary,
                 surface = LightSurfaceCard,
+                onSurface = LightTextPrimary,
                 surfaceVariant = LightSurfaceInner,
-                outline = LightBorder
+                onSurfaceVariant = LightTextSecondary,
+                surfaceContainerLowest = LightSurfaceCard,
+                surfaceContainerLow = LightBackground,
+                surfaceContainer = LightSurfaceInner,
+                surfaceContainerHigh = LightBorder,
+                surfaceContainerHighest = LightBorder,
+                surfaceTint = Color.Transparent,
+                outline = LightBorder,
+                outlineVariant = LightBorder
             )
         }
     } else {
@@ -98,31 +131,63 @@ fun ProcPulseTheme(
             darkColorScheme(
                 primary = accentColor,
                 onPrimary = Color(0xFF09090B),
-                secondary = PhosphorGreen,
+                primaryContainer = accentColor.copy(alpha = 0.16f),
+                onPrimaryContainer = accentColor,
+                secondary = accentColor,
+                onSecondary = Color(0xFF09090B),
+                secondaryContainer = accentColor.copy(alpha = 0.16f),
+                onSecondaryContainer = accentColor,
                 tertiary = TechBlue,
+                onTertiary = Color(0xFF09090B),
+                tertiaryContainer = DarkSurfaceInner,
+                onTertiaryContainer = DarkTextPrimary,
                 background = DarkBackground,
                 onBackground = DarkTextPrimary,
                 surface = DarkSurfaceCard,
                 onSurface = DarkTextPrimary,
                 surfaceVariant = DarkSurfaceInner,
                 onSurfaceVariant = DarkTextSecondary,
+                surfaceContainerLowest = DarkBackground,
+                surfaceContainerLow = DarkSurfaceCard,
+                surfaceContainer = DarkSurfaceInner,
+                surfaceContainerHigh = Color(0xFF1E1E22),
+                surfaceContainerHighest = DarkBorder,
+                surfaceTint = Color.Transparent,
                 outline = DarkBorder,
-                error = CriticalRed
+                outlineVariant = DarkBorder,
+                error = CriticalRed,
+                onError = Color.White
             )
         } else {
             lightColorScheme(
                 primary = accentColor,
                 onPrimary = Color.White,
-                secondary = PhosphorGreen,
+                primaryContainer = accentColor.copy(alpha = 0.16f),
+                onPrimaryContainer = accentColor,
+                secondary = accentColor,
+                onSecondary = Color.White,
+                secondaryContainer = accentColor.copy(alpha = 0.16f),
+                onSecondaryContainer = accentColor,
                 tertiary = TechBlue,
+                onTertiary = Color.White,
+                tertiaryContainer = LightSurfaceInner,
+                onTertiaryContainer = LightTextPrimary,
                 background = LightBackground,
                 onBackground = LightTextPrimary,
                 surface = LightSurfaceCard,
                 onSurface = LightTextPrimary,
                 surfaceVariant = LightSurfaceInner,
                 onSurfaceVariant = LightTextSecondary,
+                surfaceContainerLowest = LightSurfaceCard,
+                surfaceContainerLow = LightBackground,
+                surfaceContainer = LightSurfaceInner,
+                surfaceContainerHigh = LightBorder,
+                surfaceContainerHighest = LightBorder,
+                surfaceTint = Color.Transparent,
                 outline = LightBorder,
-                error = CriticalRed
+                outlineVariant = LightBorder,
+                error = CriticalRed,
+                onError = Color.White
             )
         }
     }

@@ -29,10 +29,16 @@ enum class AccentPreset(val label: String, val hex: Long) {
 }
 
 enum class CurrentCalibrationMode(val label: String) {
-    AUTO("Авто (по модулю тока)"),
+    AUTO("Авто (по статусу)"),
     MICRO_TO_MILLI("мкА → мА (÷ 1000)"),
     MILLI_TO_MILLI("мА → мА (1:1)"),
     DIVIDE_BY_10("Деци-мА (÷ 10)")
+}
+
+enum class SysfsAvailability(val label: String) {
+    AVAILABLE("Доступно"),
+    SELINUX_DENIED("Требуется Root (SELinux)"),
+    NOT_IN_KERNEL("Нет в ядре")
 }
 
 enum class CpuClusterRole(val label: String) {
@@ -48,7 +54,11 @@ data class CpuCoreSnapshot(
     val usagePercent: Float?, // null in Tier 0 when /proc/stat is blocked by SELinux
     val currentFreqMhz: Int,
     val maxFreqMhz: Int,
-    val governor: String
+    val governor: String,
+    val scalingMinMhz: Int = 0,
+    val scalingMaxMhz: Int = maxFreqMhz,
+    val cpuinfoMaxMhz: Int = maxFreqMhz,
+    val isOnline: Boolean = true
 )
 
 @Immutable
@@ -61,7 +71,9 @@ data class CpuTelemetry(
     val interruptsPerSec: Long?,
     val activeGovernor: String,
     val cores: List<CpuCoreSnapshot>,
-    val isUsageExact: Boolean
+    val isUsageExact: Boolean,
+    val procsRunning: Int? = null,
+    val procsBlocked: Int? = null
 )
 
 @Immutable
@@ -71,7 +83,9 @@ data class GpuTelemetry(
     val usagePercent: Float?,
     val currentFreqMhz: Int?,
     val maxFreqMhz: Int?,
-    val ddrFreqMhz: Int?
+    val ddrFreqMhz: Int?,
+    val gpuAvailability: SysfsAvailability = SysfsAvailability.AVAILABLE,
+    val ddrAvailability: SysfsAvailability = SysfsAvailability.AVAILABLE
 )
 
 @Immutable
@@ -89,7 +103,9 @@ data class MemoryTelemetry(
     val zramRatio: Float,
     val psiSomeAvg10: Double?,
     val psiFullAvg10: Double?,
-    val isDetailedExact: Boolean
+    val isDetailedExact: Boolean,
+    val zramAvailability: SysfsAvailability = SysfsAvailability.AVAILABLE,
+    val psiAvailability: SysfsAvailability = SysfsAvailability.AVAILABLE
 )
 
 @Immutable
@@ -100,6 +116,7 @@ data class BatteryTelemetry(
     val powerWatts: Float,
     val ratePctPerHour: Float,
     val chargeCounterMah: Int,
+    val estimatedFullCapacityMah: Int,
     val designCapacityMah: Int,
     val isCharging: Boolean,
     val statusLabel: String,
@@ -164,6 +181,95 @@ data class FpsTelemetry(
     val sourceNote: String
 )
 
+// --- Block 3: Lag & Freeze Diagnostics Models ---
+
+@Immutable
+data class CpuCapClusterInfo(
+    val role: CpuClusterRole,
+    val scalingMinMhz: Int,
+    val scalingMaxMhz: Int,
+    val cpuinfoMaxMhz: Int,
+    val governor: String,
+    val onlineCores: Int,
+    val totalCores: Int,
+    val isCapped: Boolean
+)
+
+@Immutable
+data class CpuSpikeEntry(
+    val processName: String,
+    val cpuPercent: Float,
+    val detail: String
+)
+
+@Immutable
+data class WakeupEntry(
+    val packageName: String,
+    val count: Int,
+    val source: String // "alarm" / "job"
+)
+
+@Immutable
+data class VmStatRates(
+    val pswpinPerSec: Float = 0f,
+    val pswpoutPerSec: Float = 0f,
+    val pgmajfaultPerSec: Float = 0f,
+    val allocstallPerSec: Float = 0f,
+    val compactStallPerSec: Float = 0f,
+    val availability: SysfsAvailability = SysfsAvailability.SELINUX_DENIED
+)
+
+@Immutable
+data class LmkKillEvent(
+    val timestampLabel: String,
+    val timestampMs: Long,
+    val packageName: String,
+    val reason: String
+)
+
+@Immutable
+data class DiskIoDiagnostics(
+    val readKbPerSec: Float = 0f,
+    val writeKbPerSec: Float = 0f,
+    val ioBusyPercent: Float = 0f,
+    val dataFreePercent: Float? = null,
+    val isIoBottleneck: Boolean = false,
+    val availability: SysfsAvailability = SysfsAvailability.SELINUX_DENIED
+)
+
+@Immutable
+data class JankDiagnostics(
+    val foregroundPackage: String? = null,
+    val rendererType: String? = null,
+    val refreshRateHz: Float = 60f,
+    val fps: Float? = null,
+    val frameTimeMs: Float? = null,
+    val jankyFramesPercent: Float? = null,
+    val totalFramesDelta: Int = 0,
+    val jankyFramesDelta: Int = 0,
+    val slowUiThreadPct: Float = 0f,
+    val slowBitmapUploadPct: Float = 0f,
+    val slowDrawCommandsPct: Float = 0f,
+    val slowGpuDeadlinePct: Float = 0f,
+    val dominantCause: String? = null,
+    val sourceNote: String = "Требуется Tier 1/2"
+)
+
+@Immutable
+data class LagDiagnosticsSnapshot(
+    val clusterCaps: List<CpuCapClusterInfo> = emptyList(),
+    val thermalServiceStatus: String? = null,
+    val procsRunning: Int? = null,
+    val procsBlocked: Int? = null,
+    val runQueueAlert: Boolean = false,
+    val minuteCpuSpikes: List<CpuSpikeEntry> = emptyList(),
+    val topWakeups: List<WakeupEntry> = emptyList(),
+    val vmStatRates: VmStatRates = VmStatRates(),
+    val lmkKillsLast5Min: List<LmkKillEvent> = emptyList(),
+    val diskIo: DiskIoDiagnostics = DiskIoDiagnostics(),
+    val jank: JankDiagnostics = JankDiagnostics()
+)
+
 @Immutable
 data class SystemSnapshot(
     val timestampMs: Long,
@@ -179,7 +285,8 @@ data class SystemSnapshot(
     val network: NetworkTelemetry,
     val fps: FpsTelemetry,
     val topCpuConsumers: List<ProcessEntry> = emptyList(),
-    val topRamConsumers: List<ProcessEntry> = emptyList()
+    val topRamConsumers: List<ProcessEntry> = emptyList(),
+    val lagDiagnostics: LagDiagnosticsSnapshot? = null
 )
 
 enum class ProcessCategory(val label: String) {
@@ -193,6 +300,7 @@ enum class ProcessCategory(val label: String) {
 enum class ProcessSortBy(val label: String) {
     CPU("CPU %"),
     RAM("RAM (PSS)"),
+    RECENT("Недавняя активность"),
     NETWORK("Сеть"),
     OOM("OOM Score"),
     PID("PID"),
@@ -211,7 +319,7 @@ enum class ProcessStateTag(val tag: String) {
 
 @Immutable
 data class ProcessEntry(
-    val pid: Int,
+    val pid: Int?,
     val ppid: Int,
     val uid: Int,
     val packageName: String,
@@ -226,8 +334,11 @@ data class ProcessEntry(
     val uptimeSeconds: Long,
     val isProtected: Boolean,
     val isFrozenOrStopped: Boolean,
-    val isEstimatedMemory: Boolean = false
-)
+    val isEstimatedMemory: Boolean = false,
+    val lastActiveTimestampMs: Long = 0L
+) {
+    fun processKey(): String = "${pid ?: -1}_${uid}_$packageName"
+}
 
 @Immutable
 data class ProcessComponentInfo(
@@ -323,6 +434,45 @@ data class ProfilerTopProcess(
     val cpuPercent: Float,
     val ramMb: Float,
     val wakeLockCount: Int = 0
+)
+
+// --- Block 4: 1-Click Lag Root-Cause Report Models ---
+
+enum class LagSeverity(val label: String) {
+    OK("НОРМА"),
+    WARNING("АНОМАЛИЯ"),
+    CRITICAL("КРИТИЧНО")
+}
+
+@Immutable
+data class LagCategoryVerdict(
+    val categoryName: String,
+    val severity: LagSeverity,
+    val summary: String,
+    val details: List<String>
+)
+
+@Immutable
+data class AppJankSummary(
+    val packageName: String,
+    val avgFps: Float?,
+    val avgJankyPercent: Float,
+    val peakJankyPercent: Float,
+    val dominantCause: String,
+    val rendererType: String?,
+    val sampleCount: Int
+)
+
+@Immutable
+data class LagRootCauseReport(
+    val sessionId: Long,
+    val sessionTitle: String,
+    val durationSec: Int,
+    val sampleCount: Int,
+    val overallVerdict: String,
+    val categories: List<LagCategoryVerdict>,
+    val appJankSummaries: List<AppJankSummary>,
+    val markdownReport: String
 )
 
 @Immutable

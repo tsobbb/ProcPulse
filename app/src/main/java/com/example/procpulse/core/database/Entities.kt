@@ -18,7 +18,8 @@ data class ProfilerSessionEntity(
     val peakTempCelsius: Float = 0f,
     val minFreeRamMb: Long = 0L,
     val avgCurrentMa: Float = 0f,
-    val sampleCount: Int = 0
+    val sampleCount: Int = 0,
+    val isLagDiagnostic: Boolean = false
 )
 
 @Entity(
@@ -45,7 +46,23 @@ data class ProfilerSampleEntity(
     val freeRamMb: Long,
     val zramUsedMb: Long,
     val fps: Float?,
-    val topProcessesJson: String
+    val topProcessesJson: String,
+    val pswpinPerSec: Float = 0f,
+    val pswpoutPerSec: Float = 0f,
+    val pgmajfaultPerSec: Float = 0f,
+    val allocstallPerSec: Float = 0f,
+    val memAvailableMb: Long = 0L,
+    val ioWaitPercent: Float = 0f,
+    val ioBusyPercent: Float = 0f,
+    val procsRunning: Int = 0,
+    val procsBlocked: Int = 0,
+    val isCpuCapped: Boolean = false,
+    val scalingMaxSummary: String = "",
+    val amKillEventsJson: String = "[]",
+    val foregroundPackage: String? = null,
+    val jankPercent: Float? = null,
+    val jankStage: String? = null,
+    val rendererType: String? = null
 )
 
 @Entity(tableName = "watchdog_events")

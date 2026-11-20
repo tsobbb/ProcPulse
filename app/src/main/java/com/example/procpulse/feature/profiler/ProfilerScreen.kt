@@ -18,25 +18,24 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Bolt
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FiberManualRecord
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -46,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -54,12 +54,18 @@ import com.example.procpulse.core.database.ProfilerSampleEntity
 import com.example.procpulse.core.database.ProfilerSessionEntity
 import com.example.procpulse.core.database.WatchdogEventEntity
 import com.example.procpulse.core.model.ChartSeriesSnapshot
+import com.example.procpulse.core.model.LagRootCauseReport
+import com.example.procpulse.core.model.LagSeverity
 import com.example.procpulse.core.model.WatchdogConfig
 import com.example.procpulse.core.ui.PrecisionCard
+import com.example.procpulse.core.ui.PrecisionFilterChip
 import com.example.procpulse.core.ui.PrecisionLineChart
+import com.example.procpulse.core.ui.PrecisionSlider
+import com.example.procpulse.core.ui.PrecisionSwitch
 import com.example.procpulse.service.ActiveProfilerState
 import com.example.ui.theme.LocalProcPulsePalette
 import com.example.ui.theme.TnumText
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -72,14 +78,17 @@ fun ProfilerScreen(
     sessions: List<ProfilerSessionEntity>,
     selectedSessionId: Long?,
     selectedSamples: List<ProfilerSampleEntity>,
+    selectedLagReport: LagRootCauseReport?,
     watchdogConfig: WatchdogConfig,
     watchdogEvents: List<WatchdogEventEntity>,
     onStartRecording: (title: String, intervalMs: Long, durationSec: Int) -> Unit,
+    onStartLagDiagnostic: (durationSec: Int) -> Unit,
     onStopRecording: () -> Unit,
     onSelectSession: (Long?) -> Unit,
     onDeleteSession: (Long) -> Unit,
     onExportCsv: (Long) -> Unit,
     onExportJson: (Long) -> Unit,
+    onCopyReportMarkdown: (String) -> Unit,
     onUpdateWatchdog: (WatchdogConfig) -> Unit,
     onClearWatchdogEvents: () -> Unit,
     modifier: Modifier = Modifier
@@ -88,7 +97,21 @@ fun ProfilerScreen(
     var sessionTitle by remember { mutableStateOf("") }
     var recIntervalMs by remember { mutableLongStateOf(1000L) }
     var recDurationSec by remember { mutableIntStateOf(0) }
+    var lagDurationSec by remember { mutableIntStateOf(180) }
     var scrubbedSampleIdx by remember { mutableStateOf<Int?>(null) }
+    var remainingSec by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(profilerState.isRecording, profilerState.startTimeMs, profilerState.targetDurationSec) {
+        if (profilerState.isRecording && profilerState.targetDurationSec > 0) {
+            while (true) {
+                val elapsed = ((System.currentTimeMillis() - profilerState.startTimeMs) / 1000L).toInt()
+                remainingSec = (profilerState.targetDurationSec - elapsed).coerceAtLeast(0)
+                delay(1000L)
+            }
+        } else {
+            remainingSec = 0
+        }
+    }
 
     val dateFmt = remember { SimpleDateFormat("dd.MM HH:mm", Locale.getDefault()) }
 
@@ -97,12 +120,76 @@ fun ProfilerScreen(
         contentPadding = PaddingValues(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        // 0. Block 4: 1-Click Lag Diagnostic Preset
+        item {
+            PrecisionCard(
+                title = "Диагностика лагов в 1 клик",
+                trailingBadge = {
+                    if (profilerState.isRecording && profilerState.isLagDiagnostic) {
+                        Text(
+                            text = "LIVE · ${remainingSec / 60}м ${remainingSec % 60}с",
+                            style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold),
+                            color = palette.critRed
+                        )
+                    } else {
+                        Text(
+                            text = "2с интервал",
+                            style = TnumText.MicroLabel,
+                            color = palette.accent
+                        )
+                    }
+                }
+            ) {
+                Text(
+                    text = "Автоматически пишет CPU Cap (scaling_max), очередь планировщика, Swap/LMKD, Disk I/O и кадры (gfxinfo/timestats). По завершении строит отчёт «Почему тормозил телефон».",
+                    style = TnumText.MicroLabel,
+                    color = palette.textSecondary
+                )
+                Spacer(Modifier.height(6.dp))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(120 to "2 мин", 180 to "3 мин", 300 to "5 мин").forEach { (sec, lbl) ->
+                        PrecisionFilterChip(
+                            selected = lagDurationSec == sec,
+                            enabled = !profilerState.isRecording,
+                            onClick = { lagDurationSec = sec },
+                            label = lbl
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                if (profilerState.isRecording && profilerState.isLagDiagnostic) {
+                    Button(
+                        onClick = onStopRecording,
+                        colors = ButtonDefaults.buttonColors(containerColor = palette.critRed, contentColor = Color.White),
+                        shape = RoundedCornerShape(4.dp),
+                        modifier = Modifier.fillMaxWidth().height(44.dp).testTag("stop_lag_diag_btn")
+                    ) {
+                        Icon(Icons.Outlined.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("ОСТАНОВИТЬ И ПОСТРОИТЬ ОТЧЁТ (${profilerState.samplesRecorded} ср.)", style = TnumText.DataRow)
+                    }
+                } else {
+                    Button(
+                        onClick = { onStartLagDiagnostic(lagDurationSec) },
+                        enabled = !profilerState.isRecording,
+                        colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = Color(0xFF09090B)),
+                        shape = RoundedCornerShape(4.dp),
+                        modifier = Modifier.fillMaxWidth().height(44.dp).testTag("start_lag_diag_btn")
+                    ) {
+                        Icon(Icons.Outlined.Bolt, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("НАЧАТЬ ДИАГНОСТИКУ ЛАГОВ (${lagDurationSec / 60} МИН)", style = TnumText.DataRow.copy(fontWeight = FontWeight.Bold))
+                    }
+                }
+            }
+        }
+
         // 1. Blackbox Recorder Controls
         item {
             PrecisionCard(
                 title = "Blackbox Profiler",
                 trailingBadge = {
-                    if (profilerState.isRecording) {
+                    if (profilerState.isRecording && !profilerState.isLagDiagnostic) {
                         Text(
                             text = "REC · ${profilerState.samplesRecorded} ср.",
                             style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold),
@@ -124,11 +211,11 @@ fun ProfilerScreen(
                 Text("Интервал записи:", style = TnumText.MicroLabel, color = palette.textSecondary)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf(1000L to "1с", 2000L to "2с", 5000L to "5с", 10_000L to "10с").forEach { (ms, lbl) ->
-                        FilterChip(
+                        PrecisionFilterChip(
                             selected = recIntervalMs == ms,
                             enabled = !profilerState.isRecording,
                             onClick = { recIntervalMs = ms },
-                            label = { Text(lbl, style = TnumText.MicroLabel) }
+                            label = lbl
                         )
                     }
                 }
@@ -136,11 +223,11 @@ fun ProfilerScreen(
                 Text("Длительность:", style = TnumText.MicroLabel, color = palette.textSecondary)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf(0 to "Вручную", 900 to "15 мин", 1800 to "30 мин", 3600 to "1 ч", 28800 to "8 ч").forEach { (sec, lbl) ->
-                        FilterChip(
+                        PrecisionFilterChip(
                             selected = recDurationSec == sec,
                             enabled = !profilerState.isRecording,
                             onClick = { recDurationSec = sec },
-                            label = { Text(lbl, style = TnumText.MicroLabel) }
+                            label = lbl
                         )
                     }
                 }
@@ -148,7 +235,7 @@ fun ProfilerScreen(
                 if (profilerState.isRecording) {
                     Button(
                         onClick = onStopRecording,
-                        colors = ButtonDefaults.buttonColors(containerColor = palette.critRed),
+                        colors = ButtonDefaults.buttonColors(containerColor = palette.critRed, contentColor = Color.White),
                         shape = RoundedCornerShape(4.dp),
                         modifier = Modifier.fillMaxWidth().height(44.dp).testTag("stop_profiler_btn")
                     ) {
@@ -157,22 +244,115 @@ fun ProfilerScreen(
                         Text("ОСТАНОВИТЬ ЗАПИСЬ (${profilerState.samplesRecorded} ср.)", style = TnumText.DataRow)
                     }
                 } else {
-                    Button(
+                    OutlinedButton(
                         onClick = { onStartRecording(sessionTitle, recIntervalMs, recDurationSec) },
                         shape = RoundedCornerShape(4.dp),
+                        border = BorderStroke(1.dp, palette.accent),
                         modifier = Modifier.fillMaxWidth().height(44.dp).testTag("start_profiler_btn")
                     ) {
-                        Icon(Icons.Outlined.FiberManualRecord, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Icon(Icons.Outlined.FiberManualRecord, contentDescription = null, tint = palette.accent, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("НАЧАТЬ ЗАПИСЬ BLACKBOX", style = TnumText.DataRow)
+                        Text("НАЧАТЬ ОБЫЧНУЮ ЗАПИСЬ BLACKBOX", style = TnumText.DataRow, color = palette.accent)
                     }
                 }
             }
         }
 
-        // 2. Post-Analysis Timeline Viewer (when a session is selected)
+        // 2. Post-Analysis & Automatic Root-Cause Report (when a session is selected)
         val activeSession = sessions.firstOrNull { it.id == selectedSessionId }
         if (activeSession != null) {
+            if (selectedLagReport != null) {
+                item {
+                    val worstSeverity = when {
+                        selectedLagReport.categories.any { it.severity == LagSeverity.CRITICAL } -> LagSeverity.CRITICAL
+                        selectedLagReport.categories.any { it.severity == LagSeverity.WARNING } -> LagSeverity.WARNING
+                        else -> LagSeverity.OK
+                    }
+                    val verdictColor = when (worstSeverity) {
+                        LagSeverity.CRITICAL -> palette.critRed
+                        LagSeverity.WARNING -> palette.warnAmber
+                        LagSeverity.OK -> palette.okGreen
+                    }
+
+                    PrecisionCard(
+                        title = "Почему тормозил телефон (${selectedLagReport.durationSec}с)",
+                        trailingBadge = {
+                            OutlinedButton(
+                                onClick = { onCopyReportMarkdown(selectedLagReport.markdownReport) },
+                                modifier = Modifier.height(30.dp).testTag("copy_lag_report_btn"),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                shape = RoundedCornerShape(4.dp),
+                                border = BorderStroke(1.dp, palette.accent)
+                            ) {
+                                Icon(Icons.Outlined.ContentCopy, contentDescription = null, tint = palette.accent, modifier = Modifier.size(12.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("MD", style = TnumText.MicroLabel, color = palette.accent)
+                            }
+                        }
+                    ) {
+                        Text(
+                            text = selectedLagReport.overallVerdict,
+                            style = TnumText.DataRow.copy(fontWeight = FontWeight.Bold),
+                            color = verdictColor,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(verdictColor.copy(alpha = 0.12f))
+                                .border(1.dp, verdictColor.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
+                                .padding(8.dp)
+                        )
+                        Spacer(Modifier.height(8.dp))
+
+                        selectedLagReport.categories.forEachIndexed { idx, cat ->
+                            val sevColor = when (cat.severity) {
+                                LagSeverity.CRITICAL -> palette.critRed
+                                LagSeverity.WARNING -> palette.warnAmber
+                                LagSeverity.OK -> palette.okGreen
+                            }
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(palette.innerSurface)
+                                    .border(1.dp, palette.border, RoundedCornerShape(4.dp))
+                                    .padding(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(cat.categoryName, style = TnumText.DataRow.copy(fontWeight = FontWeight.Bold), color = palette.textPrimary)
+                                    Text(
+                                        text = cat.severity.label,
+                                        style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold),
+                                        color = sevColor
+                                    )
+                                }
+                                Spacer(Modifier.height(2.dp))
+                                Text(cat.summary, style = TnumText.MicroLabel, color = palette.textSecondary)
+                                cat.details.forEach { d ->
+                                    Text("• $d", style = TnumText.MicroLabel, color = palette.textMuted)
+                                }
+                            }
+                            if (idx < selectedLagReport.categories.lastIndex) Spacer(Modifier.height(6.dp))
+                        }
+
+                        if (selectedLagReport.appJankSummaries.isNotEmpty()) {
+                            Spacer(Modifier.height(8.dp))
+                            Text("Разбивка по приложениям (Jank):", style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold), color = palette.textSecondary)
+                            selectedLagReport.appJankSummaries.take(5).forEach { app ->
+                                Text(
+                                    text = "• ${app.packageName}: ${app.avgFps?.let { "${it.toInt()} FPS, " } ?: ""}Janky avg ${"%.1f".format(Locale.US, app.avgJankyPercent)}% (пик ${"%.1f".format(Locale.US, app.peakJankyPercent)}%) · ${app.dominantCause}",
+                                    style = TnumText.MicroLabel,
+                                    color = palette.textPrimary
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             item {
                 PrecisionCard(
                     title = "Пост-анализ: ${activeSession.title}",
@@ -181,6 +361,7 @@ fun ProfilerScreen(
                             OutlinedButton(
                                 onClick = { onExportCsv(activeSession.id) },
                                 modifier = Modifier.height(30.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                                 shape = RoundedCornerShape(4.dp)
                             ) {
                                 Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(12.dp))
@@ -190,6 +371,7 @@ fun ProfilerScreen(
                             OutlinedButton(
                                 onClick = { onExportJson(activeSession.id) },
                                 modifier = Modifier.height(30.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                                 shape = RoundedCornerShape(4.dp)
                             ) {
                                 Text("JSON", style = TnumText.MicroLabel)
@@ -247,7 +429,7 @@ fun ProfilerScreen(
                                     color = palette.accent
                                 )
                                 Text(
-                                    text = "Кластеры: ${inspectedSample.clusterFreqsSummary}",
+                                    text = "Кластеры: ${inspectedSample.clusterFreqsSummary} · iowait ${"%.1f".format(Locale.US, inspectedSample.ioWaitPercent)}%",
                                     style = TnumText.MicroLabel,
                                     color = palette.textSecondary
                                 )
@@ -256,8 +438,9 @@ fun ProfilerScreen(
                                     Text("Нет данных о процессах в этом срезе", style = TnumText.MicroLabel, color = palette.textMuted)
                                 } else {
                                     topProcs.forEach { p ->
+                                        val pidLabel = if (p.pid > 0) " (${p.pid})" else ""
                                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                            Text("${p.displayName} (${p.pid})", style = TnumText.MicroLabel, color = palette.textPrimary)
+                                            Text("${p.displayName}$pidLabel", style = TnumText.MicroLabel, color = palette.textPrimary)
                                             Text("${"%.1f".format(Locale.US, p.cpuPercent)}% · ${p.ramMb.toInt()}MB", style = TnumText.MicroLabel, color = palette.textSecondary)
                                         }
                                     }
@@ -273,7 +456,7 @@ fun ProfilerScreen(
         item {
             PrecisionCard(title = "Сохранённые сессии (${sessions.size})") {
                 if (sessions.isEmpty()) {
-                    Text("Записей пока нет. Нажмите «Начать запись Blackbox» выше.", style = TnumText.MicroLabel, color = palette.textMuted)
+                    Text("Записей пока нет. Запустите «Диагностику лагов» или Blackbox выше.", style = TnumText.MicroLabel, color = palette.textMuted)
                 } else {
                     sessions.forEachIndexed { idx, s ->
                         val isSel = s.id == selectedSessionId
@@ -311,7 +494,7 @@ fun ProfilerScreen(
             PrecisionCard(
                 title = "Watchdog (Локальный сторож)",
                 trailingBadge = {
-                    Switch(
+                    PrecisionSwitch(
                         checked = watchdogConfig.enabled,
                         onCheckedChange = { onUpdateWatchdog(watchdogConfig.copy(enabled = it)) },
                         modifier = Modifier.testTag("watchdog_enable_switch")
@@ -326,21 +509,21 @@ fun ProfilerScreen(
                 Spacer(Modifier.height(8.dp))
 
                 Text("Порог CPU при выключенном экране: > ${watchdogConfig.cpuThresholdPercent}% (${watchdogConfig.cpuDurationMinutes} мин)", style = TnumText.MicroLabel, color = palette.textPrimary)
-                Slider(
+                PrecisionSlider(
                     value = watchdogConfig.cpuThresholdPercent.toFloat(),
                     onValueChange = { onUpdateWatchdog(watchdogConfig.copy(cpuThresholdPercent = it.roundToInt())) },
                     valueRange = 15f..90f
                 )
 
                 Text("Порог температуры SoC/Батареи: > ${watchdogConfig.tempThresholdCelsius}°C", style = TnumText.MicroLabel, color = palette.textPrimary)
-                Slider(
+                PrecisionSlider(
                     value = watchdogConfig.tempThresholdCelsius.toFloat(),
                     onValueChange = { onUpdateWatchdog(watchdogConfig.copy(tempThresholdCelsius = it.roundToInt())) },
                     valueRange = 36f..65f
                 )
 
                 Text("Порог свободной RAM + ZRAM: < ${watchdogConfig.freeRamThresholdMb} МБ", style = TnumText.MicroLabel, color = palette.textPrimary)
-                Slider(
+                PrecisionSlider(
                     value = watchdogConfig.freeRamThresholdMb.toFloat(),
                     onValueChange = { onUpdateWatchdog(watchdogConfig.copy(freeRamThresholdMb = it.roundToInt())) },
                     valueRange = 128f..1500f
@@ -355,7 +538,7 @@ fun ProfilerScreen(
                         Text("Авто-реакция для Blacklist (Opt-in)", style = TnumText.DataRow, color = palette.textPrimary)
                         Text("Force Stop / Freeze после ${watchdogConfig.screenOffFreezeDelayMinutes} мин сна (Tier 1/2)", style = TnumText.MicroLabel, color = palette.textMuted)
                     }
-                    Switch(
+                    PrecisionSwitch(
                         checked = watchdogConfig.autoKillBlacklisted,
                         onCheckedChange = { onUpdateWatchdog(watchdogConfig.copy(autoKillBlacklisted = it)) }
                     )
@@ -372,6 +555,7 @@ fun ProfilerScreen(
                         OutlinedButton(
                             onClick = onClearWatchdogEvents,
                             modifier = Modifier.height(28.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                             shape = RoundedCornerShape(4.dp),
                             border = BorderStroke(1.dp, palette.border)
                         ) {

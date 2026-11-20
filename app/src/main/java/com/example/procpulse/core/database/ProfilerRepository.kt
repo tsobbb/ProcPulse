@@ -1,5 +1,6 @@
 package com.example.procpulse.core.database
 
+import com.example.procpulse.core.model.LmkKillEvent
 import com.example.procpulse.core.model.ProfilerTopProcess
 import kotlinx.coroutines.flow.Flow
 import org.json.JSONArray
@@ -21,11 +22,15 @@ class ProfilerRepository(
     suspend fun getSession(sessionId: Long): ProfilerSessionEntity? =
         profilerDao.getSessionById(sessionId)
 
+    suspend fun getSamples(sessionId: Long): List<ProfilerSampleEntity> =
+        profilerDao.getSamplesForSession(sessionId)
+
     suspend fun startSession(
         title: String,
         intervalMs: Long,
         targetDurationSec: Int,
-        tierUsed: String
+        tierUsed: String,
+        isLagDiagnostic: Boolean = false
     ): Long {
         val entity = ProfilerSessionEntity(
             title = title,
@@ -33,7 +38,8 @@ class ProfilerRepository(
             endTimeMs = null,
             intervalMs = intervalMs,
             targetDurationSec = targetDurationSec,
-            tierUsed = tierUsed
+            tierUsed = tierUsed,
+            isLagDiagnostic = isLagDiagnostic
         )
         return profilerDao.insertSession(entity)
     }
@@ -93,17 +99,29 @@ class ProfilerRepository(
         val samples = profilerDao.getSamplesForSession(sessionId)
         val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
         val sb = StringBuilder()
-        sb.appendLine("# ProcPulse Blackbox Session: ${session?.title ?: sessionId}")
-        sb.appendLine("timestamp,cpu_percent,cluster_freqs,soc_temp_c,battery_temp_c,current_ma,free_ram_mb,zram_used_mb,fps,top_processes")
+        sb.appendLine("# ProcPulse Blackbox Session: ${session?.title ?: sessionId} (LagDiag=${session?.isLagDiagnostic == true})")
+        sb.appendLine(
+            "timestamp,cpu_percent,cluster_freqs,soc_temp_c,battery_temp_c,current_ma,free_ram_mb,mem_avail_mb," +
+                "zram_used_mb,fps,jank_pct,jank_stage,renderer,fg_pkg,cpu_capped,procs_run,procs_blk," +
+                "pswpin_s,pswpout_s,pgmajfault_s,allocstall_s,iowait_pct,iobusy_pct,top_processes"
+        )
         for (s in samples) {
             val ts = fmt.format(Date(s.timestampMs))
             val escapedTop = s.topProcessesJson.replace("\"", "\"\"")
             val escapedFreqs = s.clusterFreqsSummary.replace("\"", "\"\"")
+            val escapedStage = (s.jankStage ?: "").replace("\"", "\"\"")
             sb.appendLine(
                 "$ts,${"%.1f".format(Locale.US, s.cpuTotalPercent)},\"$escapedFreqs\"," +
                     "${"%.1f".format(Locale.US, s.tempCelsius)},${"%.1f".format(Locale.US, s.batteryTempCelsius)}," +
-                    "${"%.1f".format(Locale.US, s.currentMa)},${s.freeRamMb},${s.zramUsedMb}," +
-                    "${s.fps?.let { "%.1f".format(Locale.US, it) } ?: ""},\"$escapedTop\""
+                    "${"%.1f".format(Locale.US, s.currentMa)},${s.freeRamMb},${s.memAvailableMb},${s.zramUsedMb}," +
+                    "${s.fps?.let { "%.1f".format(Locale.US, it) } ?: ""}," +
+                    "${s.jankPercent?.let { "%.1f".format(Locale.US, it) } ?: ""}," +
+                    "\"$escapedStage\",\"${s.rendererType ?: ""}\",\"${s.foregroundPackage ?: ""}\"," +
+                    "${s.isCpuCapped},${s.procsRunning},${s.procsBlocked}," +
+                    "${"%.1f".format(Locale.US, s.pswpinPerSec)},${"%.1f".format(Locale.US, s.pswpoutPerSec)}," +
+                    "${"%.1f".format(Locale.US, s.pgmajfaultPerSec)},${"%.1f".format(Locale.US, s.allocstallPerSec)}," +
+                    "${"%.1f".format(Locale.US, s.ioWaitPercent)},${"%.1f".format(Locale.US, s.ioBusyPercent)}," +
+                    "\"$escapedTop\""
             )
         }
         return sb.toString()
@@ -116,6 +134,7 @@ class ProfilerRepository(
         if (session != null) {
             root.put("id", session.id)
             root.put("title", session.title)
+            root.put("isLagDiagnostic", session.isLagDiagnostic)
             root.put("startTimeMs", session.startTimeMs)
             root.put("endTimeMs", session.endTimeMs ?: JSONObject.NULL)
             root.put("intervalMs", session.intervalMs)
@@ -131,12 +150,28 @@ class ProfilerRepository(
             obj.put("timestampMs", s.timestampMs)
             obj.put("cpuTotalPercent", s.cpuTotalPercent)
             obj.put("clusterFreqs", s.clusterFreqsSummary)
+            obj.put("scalingMaxSummary", s.scalingMaxSummary)
+            obj.put("isCpuCapped", s.isCpuCapped)
+            obj.put("procsRunning", s.procsRunning)
+            obj.put("procsBlocked", s.procsBlocked)
             obj.put("tempCelsius", s.tempCelsius)
             obj.put("batteryTempCelsius", s.batteryTempCelsius)
             obj.put("currentMa", s.currentMa)
             obj.put("freeRamMb", s.freeRamMb)
+            obj.put("memAvailableMb", s.memAvailableMb)
             obj.put("zramUsedMb", s.zramUsedMb)
+            obj.put("pswpinPerSec", s.pswpinPerSec)
+            obj.put("pswpoutPerSec", s.pswpoutPerSec)
+            obj.put("pgmajfaultPerSec", s.pgmajfaultPerSec)
+            obj.put("allocstallPerSec", s.allocstallPerSec)
+            obj.put("ioWaitPercent", s.ioWaitPercent)
+            obj.put("ioBusyPercent", s.ioBusyPercent)
             obj.put("fps", s.fps ?: JSONObject.NULL)
+            obj.put("jankPercent", s.jankPercent ?: JSONObject.NULL)
+            obj.put("jankStage", s.jankStage ?: JSONObject.NULL)
+            obj.put("rendererType", s.rendererType ?: JSONObject.NULL)
+            obj.put("foregroundPackage", s.foregroundPackage ?: JSONObject.NULL)
+            obj.put("amKillEvents", runCatching { JSONArray(s.amKillEventsJson) }.getOrElse { JSONArray() })
             obj.put("topProcesses", runCatching { JSONArray(s.topProcessesJson) }.getOrElse { JSONArray() })
             arr.put(obj)
         }
@@ -176,6 +211,44 @@ class ProfilerRepository(
                                 cpuPercent = obj.optDouble("cpu", 0.0).toFloat(),
                                 ramMb = obj.optDouble("ram", 0.0).toFloat(),
                                 wakeLockCount = obj.optInt("wl", 0)
+                            )
+                        )
+                    }
+                }
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        }
+
+        fun encodeLmkEvents(events: List<LmkKillEvent>): String {
+            if (events.isEmpty()) return "[]"
+            val arr = JSONArray()
+            for (ev in events.take(10)) {
+                arr.put(
+                    JSONObject().apply {
+                        put("ts", ev.timestampLabel)
+                        put("ms", ev.timestampMs)
+                        put("pkg", ev.packageName)
+                        put("reason", ev.reason)
+                    }
+                )
+            }
+            return arr.toString()
+        }
+
+        fun decodeLmkEvents(json: String): List<LmkKillEvent> {
+            if (json.isBlank() || json == "[]") return emptyList()
+            return try {
+                val arr = JSONArray(json)
+                buildList {
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.getJSONObject(i)
+                        add(
+                            LmkKillEvent(
+                                timestampLabel = obj.optString("ts"),
+                                timestampMs = obj.optLong("ms"),
+                                packageName = obj.optString("pkg"),
+                                reason = obj.optString("reason")
                             )
                         )
                     }

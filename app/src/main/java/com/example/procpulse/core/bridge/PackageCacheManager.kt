@@ -1,6 +1,7 @@
 package com.example.procpulse.core.bridge
 
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -28,8 +29,9 @@ class PackageCacheManager(private val context: Context) {
 
     private val pm: PackageManager = context.packageManager
     private val metaByPkg = ConcurrentHashMap<String, CachedAppMeta>()
-    private val pkgByUid = ConcurrentHashMap<Int, String>()
-    private val iconCache = LruCache<String, ImageBitmap>(256)
+    private val labelByPkg = ConcurrentHashMap<String, String>()
+    private val pkgByUserUid = ConcurrentHashMap<Int, String>()
+    private val iconCache = LruCache<String, ImageBitmap>(64)
 
     @Volatile
     private var lastLoadedMs: Long = 0L
@@ -40,6 +42,7 @@ class PackageCacheManager(private val context: Context) {
     private val protectedCorePackages = setOf(
         "android",
         "system",
+        "system_server",
         "com.android.systemui",
         "com.android.phone",
         "com.android.server.telecom",
@@ -51,6 +54,7 @@ class PackageCacheManager(private val context: Context) {
         "/system/bin/surfaceflinger",
         "zygote",
         "zygote64",
+        "webview_zygote",
         "init",
         "servicemanager",
         "hwservicemanager"
@@ -73,6 +77,7 @@ class PackageCacheManager(private val context: Context) {
                 val pkg = intent?.data?.schemeSpecificPart
                 if (pkg != null) {
                     iconCache.remove(pkg)
+                    labelByPkg.remove(pkg)
                 }
                 lastLoadedMs = 0L
             }
@@ -87,10 +92,10 @@ class PackageCacheManager(private val context: Context) {
 
     fun refreshIfNeeded(force: Boolean = false) {
         val now = System.currentTimeMillis()
-        if (!force && now - lastLoadedMs < 20_000L && metaByPkg.isNotEmpty()) return
+        if (!force && now - lastLoadedMs < 30_000L && metaByPkg.isNotEmpty()) return
 
         synchronized(this) {
-            if (!force && now - lastLoadedMs < 20_000L && metaByPkg.isNotEmpty()) return
+            if (!force && now - lastLoadedMs < 30_000L && metaByPkg.isNotEmpty()) return
 
             val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
             defaultLauncherPkg = runCatching {
@@ -107,7 +112,9 @@ class PackageCacheManager(private val context: Context) {
             }.getOrDefault(emptyList())
 
             for (app in apps) {
-                val label = runCatching { pm.getApplicationLabel(app).toString() }.getOrElse { app.packageName }
+                val label = labelByPkg.getOrPut(app.packageName) {
+                    runCatching { pm.getApplicationLabel(app).toString() }.getOrElse { app.packageName }
+                }
                 val isSys = (app.flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0
                 val meta = CachedAppMeta(
                     packageName = app.packageName,
@@ -116,7 +123,10 @@ class PackageCacheManager(private val context: Context) {
                     isSystem = isSys
                 )
                 metaByPkg[app.packageName] = meta
-                pkgByUid.putIfAbsent(app.uid, app.packageName)
+                // Strictly only map user-app UIDs (>= 10000) to avoid resolving UID 1000 to random system APK
+                if (app.uid % 100000 >= 10000) {
+                    pkgByUserUid.putIfAbsent(app.uid, app.packageName)
+                }
             }
             lastLoadedMs = now
         }
@@ -128,14 +138,25 @@ class PackageCacheManager(private val context: Context) {
         return metaByPkg[cleanPkg]
     }
 
-    fun getPackageForUid(uid: Int): String? {
+    /**
+     * Last-resort fallback strictly for user UIDs (uid % 100000 >= 10000).
+     * Never resolves shared system UIDs (< 10000) like UID 1000.
+     */
+    fun getUserPackageForUid(uid: Int): String? {
+        if (uid % 100000 < 10000) return null
         refreshIfNeeded()
-        return pkgByUid[uid] ?: runCatching { pm.getNameForUid(uid)?.substringBefore(':') }.getOrNull()
+        pkgByUserUid[uid]?.let { return it }
+        val pkgs = runCatching { pm.getPackagesForUid(uid) }.getOrNull()
+        val first = pkgs?.firstOrNull()
+        if (first != null) {
+            pkgByUserUid.putIfAbsent(uid, first)
+        }
+        return first
     }
 
     fun getAllApps(): List<CachedAppMeta> {
         refreshIfNeeded()
-        return metaByPkg.values.toList()
+        return metaByPkg.values.sortedBy { it.displayName.lowercase() }
     }
 
     fun isProtectedPackage(packageOrCmd: String, userWhitelist: Set<String>): Boolean {
@@ -146,11 +167,21 @@ class PackageCacheManager(private val context: Context) {
         return false
     }
 
-    fun getAppIcon(packageName: String): ImageBitmap? {
+    fun getCachedIcon(packageName: String): ImageBitmap? {
         val clean = packageName.substringBefore(':')
+        return iconCache.get(clean)
+    }
+
+    /**
+     * Lazily decodes and downscales icon to 48x48 px on caller thread (should be Dispatchers.IO),
+     * stored in LruCache(64) to keep ProcPulse RAM < 80 MB.
+     */
+    fun loadAppIconSync(packageName: String): ImageBitmap? {
+        val clean = packageName.substringBefore(':')
+        if (!clean.contains('.')) return null
         iconCache.get(clean)?.let { return it }
         val drawable: Drawable = runCatching { pm.getApplicationIcon(clean) }.getOrNull() ?: return null
-        val bitmap = drawableToBitmap(drawable, 72)
+        val bitmap = drawableToBitmap(drawable, 48)
         val img = bitmap.asImageBitmap()
         iconCache.put(clean, img)
         return img
@@ -168,7 +199,7 @@ class PackageCacheManager(private val context: Context) {
                 pm.getPackageInfo(clean, flags)
             }
             pkgInfo.services?.forEach { svc ->
-                val state = pm.getComponentEnabledSetting(android.content.ComponentName(clean, svc.name))
+                val state = pm.getComponentEnabledSetting(ComponentName(clean, svc.name))
                 val isEnabled = when (state) {
                     PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
                     PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER -> false
@@ -178,7 +209,7 @@ class PackageCacheManager(private val context: Context) {
                 result.add(ProcessComponentInfo(name = svc.name, type = "SERVICE", enabled = isEnabled))
             }
             pkgInfo.receivers?.forEach { rcv ->
-                val state = pm.getComponentEnabledSetting(android.content.ComponentName(clean, rcv.name))
+                val state = pm.getComponentEnabledSetting(ComponentName(clean, rcv.name))
                 val isEnabled = when (state) {
                     PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
                     PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER -> false

@@ -19,11 +19,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -33,6 +35,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,12 +48,15 @@ import androidx.compose.ui.unit.sp
 import com.example.procpulse.core.model.CapabilityTier
 import com.example.procpulse.core.model.ChartSeriesSnapshot
 import com.example.procpulse.core.model.CpuClusterRole
+import com.example.procpulse.core.model.LagDiagnosticsSnapshot
 import com.example.procpulse.core.model.ProcessEntry
 import com.example.procpulse.core.model.SocketConnection
+import com.example.procpulse.core.model.SysfsAvailability
 import com.example.procpulse.core.model.SystemSnapshot
 import com.example.procpulse.core.model.ThermalLevel
 import com.example.procpulse.core.ui.HonestDegradationBanner
 import com.example.procpulse.core.ui.PrecisionCard
+import com.example.procpulse.core.ui.PrecisionFilterChip
 import com.example.procpulse.core.ui.PrecisionLineChart
 import com.example.procpulse.core.ui.SegmentedMemoryBar
 import com.example.procpulse.core.ui.thresholdColor
@@ -106,17 +112,21 @@ fun DashboardScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    val intervals = listOf(250L to "250м", 500L to "500м", 1000L to "1с", 2000L to "2с", 5000L to "5с")
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    val intervals = listOf(250L to "250мс", 500L to "500мс", 1000L to "1с", 2000L to "2с", 5000L to "5с")
                     intervals.forEach { (ms, label) ->
-                        FilterChip(
+                        PrecisionFilterChip(
                             selected = samplingIntervalMs == ms,
                             onClick = { onSelectSamplingInterval(ms) },
-                            label = { Text(label, style = TnumText.MicroLabel) },
+                            label = label,
                             modifier = Modifier.height(32.dp)
                         )
                     }
                 }
+                Spacer(Modifier.width(6.dp))
                 IconButton(
                     onClick = onTogglePause,
                     modifier = Modifier
@@ -225,7 +235,12 @@ fun DashboardScreen(
                                 } else if (core.maxFreqMhz > 0) {
                                     (core.currentFreqMhz.toFloat() / core.maxFreqMhz.toFloat()).coerceIn(0f, 1f)
                                 } else 0f
-                                val barColor = thresholdColor(ratio * 100f)
+                                // Red reserved strictly for real CPU > 85% / thermal throttling; Tier 0 freq bar uses accent
+                                val barColor = if (core.usagePercent != null) {
+                                    thresholdColor(core.usagePercent)
+                                } else {
+                                    palette.accent
+                                }
                                 Column(
                                     modifier = Modifier
                                         .weight(1f)
@@ -302,12 +317,13 @@ fun DashboardScreen(
                     MetricBlock(
                         label = "GPU LOAD",
                         value = gpu.usagePercent?.let { "${it.toInt()}%" } ?: "N/A",
-                        sub = gpu.currentFreqMhz?.let { "$it / ${gpu.maxFreqMhz ?: it} MHz" } ?: "Частота скрыта"
+                        sub = gpu.currentFreqMhz?.let { "$it / ${gpu.maxFreqMhz ?: it} MHz" }
+                            ?: gpu.gpuAvailability.label
                     )
                     MetricBlock(
                         label = "DDR / BUS",
                         value = gpu.ddrFreqMhz?.let { "$it MHz" } ?: "N/A",
-                        sub = "devfreq"
+                        sub = if (gpu.ddrFreqMhz != null) "devfreq" else gpu.ddrAvailability.label
                     )
                     MetricBlock(
                         label = "LIVE FPS",
@@ -357,20 +373,24 @@ fun DashboardScreen(
                         .padding(8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text("ZRAM / SWAP", style = TnumText.MicroLabel, color = palette.textMuted)
                         Text(
-                            text = "${mem.zramUsedMb} / ${mem.zramTotalMb} MB",
+                            text = if (mem.zramTotalMb > 0) "${mem.zramUsedMb} / ${mem.zramTotalMb} MB" else "N/A",
                             style = TnumText.DataRow,
                             color = palette.textPrimary
                         )
                         Text(
-                            text = "Orig ${mem.zramOrigMb}M → Compr ${mem.zramComprMb}M (${"%.2f".format(Locale.US, mem.zramRatio)}x)",
+                            text = if (mem.zramAvailability == SysfsAvailability.AVAILABLE && mem.zramComprMb > 0) {
+                                "Orig ${mem.zramOrigMb}M → Compr ${mem.zramComprMb}M (${"%.2f".format(Locale.US, mem.zramRatio)}x)"
+                            } else {
+                                mem.zramAvailability.label
+                            },
                             style = TnumText.MicroLabel,
                             color = palette.textSecondary
                         )
                     }
-                    Column(horizontalAlignment = Alignment.End) {
+                    Column(horizontalAlignment = Alignment.End, modifier = Modifier.weight(1f)) {
                         Text("PSI MEMORY", style = TnumText.MicroLabel, color = palette.textMuted)
                         Text(
                             text = mem.psiSomeAvg10?.let { "some ${"%.2f".format(Locale.US, it)}%" } ?: "N/A",
@@ -378,7 +398,8 @@ fun DashboardScreen(
                             color = palette.textPrimary
                         )
                         Text(
-                            text = mem.psiFullAvg10?.let { "full ${"%.2f".format(Locale.US, it)}%" } ?: "Tier 1/2",
+                            text = mem.psiFullAvg10?.let { "full ${"%.2f".format(Locale.US, it)}%" }
+                                ?: mem.psiAvailability.label,
                             style = TnumText.MicroLabel,
                             color = palette.textSecondary
                         )
@@ -428,9 +449,13 @@ fun DashboardScreen(
                         sub = "${"%.1f".format(Locale.US, bat.ratePctPerHour)} %/ч"
                     )
                     MetricBlock(
-                        label = "ЁМКОСТЬ",
+                        label = "ОСТАТОК ЗАРЯДА",
                         value = if (bat.chargeCounterMah > 0) "${bat.chargeCounterMah} мАч" else "N/A",
-                        sub = if (bat.designCapacityMah > 0) "Проект: ${bat.designCapacityMah}" else "${bat.tempCelsius}°C"
+                        sub = when {
+                            bat.designCapacityMah > 0 -> "Проект: ${bat.designCapacityMah}"
+                            bat.estimatedFullCapacityMah > 0 -> "100%: ~${bat.estimatedFullCapacityMah} мАч"
+                            else -> "${bat.tempCelsius}°C"
+                        }
                     )
                 }
                 Spacer(modifier = Modifier.height(8.dp))
@@ -524,7 +549,18 @@ fun DashboardScreen(
             }
         }
 
-        // 6. Network & Sockets Card
+        // 6. Block 3: Lag & Freeze Diagnostics Card
+        item {
+            LagDiagnosticsCard(
+                tier = snapshot.tier,
+                shizukuAvailable = snapshot.shizukuAvailable,
+                lag = snapshot.lagDiagnostics,
+                onConnectShizuku = onConnectShizuku,
+                onRequestRoot = onRequestRoot
+            )
+        }
+
+        // 7. Network & Sockets Card
         item {
             val net = snapshot.network
             PrecisionCard(
@@ -586,7 +622,7 @@ fun DashboardScreen(
             }
         }
 
-        // 7. Top Consumers Quick Jump
+        // 8. Top Consumers Quick Jump
         if (snapshot.topCpuConsumers.isNotEmpty() || snapshot.topRamConsumers.isNotEmpty()) {
             item {
                 val topList = snapshot.topCpuConsumers.ifEmpty { snapshot.topRamConsumers }
@@ -608,14 +644,24 @@ fun DashboardScreen(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
-                                Text(
-                                    text = "${proc.packageName} · PID ${proc.pid}",
-                                    style = TnumText.MicroLabel,
-                                    color = palette.textMuted,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = proc.packageName,
+                                        style = TnumText.MicroLabel,
+                                        color = palette.textMuted,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    Text(
+                                        text = if (proc.pid != null) " · PID ${proc.pid}" else " · PID N/A · UID ${proc.uid}",
+                                        style = TnumText.MicroLabel,
+                                        color = palette.textMuted,
+                                        maxLines = 1
+                                    )
+                                }
                             }
+                            Spacer(Modifier.width(8.dp))
                             Text(
                                 text = "${proc.cpuPercent?.let { "%.1f%%".format(Locale.US, it) } ?: "--"}  |  ${proc.ramPssMb?.let { "${it.toInt()} MB" } ?: "--"}",
                                 style = TnumText.DataRow,
@@ -672,6 +718,262 @@ fun DashboardScreen(
                 }
             }
         )
+    }
+}
+
+@Composable
+private fun LagDiagnosticsCard(
+    tier: CapabilityTier,
+    shizukuAvailable: Boolean,
+    lag: LagDiagnosticsSnapshot?,
+    onConnectShizuku: () -> Unit,
+    onRequestRoot: () -> Unit
+) {
+    val palette = LocalProcPulsePalette.current
+    var expanded by rememberSaveable { mutableStateOf(true) }
+    val hasAlert = lag != null && (
+        lag.clusterCaps.any { it.isCapped } ||
+            lag.runQueueAlert ||
+            lag.lmkKillsLast5Min.isNotEmpty() ||
+            lag.diskIo.isIoBottleneck ||
+            (lag.jank.jankyFramesPercent ?: 0f) >= 10f
+        )
+
+    PrecisionCard(
+        title = "Причины лагов и фризов",
+        trailingBadge = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 4.dp, vertical = 2.dp)
+            ) {
+                if (hasAlert) {
+                    Icon(
+                        imageVector = Icons.Outlined.WarningAmber,
+                        contentDescription = "Аномалия",
+                        tint = palette.critRed,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                }
+                Text(
+                    text = if (expanded) "Свернуть" else "Развернуть",
+                    style = TnumText.MicroLabel,
+                    color = palette.accent
+                )
+                Icon(
+                    imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    contentDescription = null,
+                    tint = palette.accent,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+    ) {
+        if (!expanded) {
+            Text(
+                text = if (tier == CapabilityTier.STANDARD) {
+                    "Требуется Tier 1/2 для чтения vmstat, CPU Cap и Jank"
+                } else {
+                    "CPU Cap: ${lag?.clusterCaps?.count { it.isCapped } ?: 0} · LMK kills: ${lag?.lmkKillsLast5Min?.size ?: 0} · Janky: ${lag?.jank?.jankyFramesPercent?.let { "%.1f%%".format(Locale.US, it) } ?: "--"}"
+                },
+                style = TnumText.MicroLabel,
+                color = palette.textSecondary
+            )
+            return@PrecisionCard
+        }
+
+        if (tier == CapabilityTier.STANDARD || lag == null) {
+            HonestDegradationBanner(
+                reason = "Скрытый CPU Cap, очередь планировщика (/proc/stat), Swap-трэшинг (/proc/vmstat), LMKD-события и Jank Profiler требуют Shizuku (Tier 1) или Root (Tier 2).",
+                shizukuAvailable = shizukuAvailable,
+                onConnectShizuku = onConnectShizuku,
+                onRequestRoot = onRequestRoot
+            )
+            return@PrecisionCard
+        }
+
+        // 1. Hidden CPU Cap & ThermalService
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(4.dp))
+                .background(palette.innerSurface)
+                .border(1.dp, palette.border, RoundedCornerShape(4.dp))
+                .padding(8.dp)
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("1. СКРЫТЫЙ CPU CAP & THERMAL", style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold), color = palette.textSecondary)
+                lag.thermalServiceStatus?.let {
+                    Text("ThermalService: $it", style = TnumText.MicroLabel, color = palette.accent)
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            lag.clusterCaps.forEach { cl ->
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(
+                        text = "${cl.role.label} (${cl.onlineCores}/${cl.totalCores} on) · ${cl.governor}",
+                        style = TnumText.MicroLabel,
+                        color = palette.textPrimary
+                    )
+                    Text(
+                        text = if (cl.isCapped) {
+                            "CAP ${cl.scalingMaxMhz}/${cl.cpuinfoMaxMhz}MHz"
+                        } else {
+                            "${cl.scalingMinMhz}-${cl.scalingMaxMhz}/${cl.cpuinfoMaxMhz}MHz"
+                        },
+                        style = TnumText.MicroLabel.copy(fontWeight = if (cl.isCapped) FontWeight.Bold else FontWeight.Normal),
+                        color = if (cl.isCapped) palette.critRed else palette.okGreen
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(6.dp))
+
+        // 2. Run Queue & 1-min spikes
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(4.dp))
+                .background(palette.innerSurface)
+                .border(1.dp, palette.border, RoundedCornerShape(4.dp))
+                .padding(8.dp)
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("2. ОЧЕРЕДЬ ЯДРА (RUN QUEUE) & СПАЙКИ", style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold), color = palette.textSecondary)
+                Text(
+                    text = "run:${lag.procsRunning ?: "--"} blk:${lag.procsBlocked ?: "--"}",
+                    style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold),
+                    color = if (lag.runQueueAlert) palette.critRed else palette.okGreen
+                )
+            }
+            if (lag.minuteCpuSpikes.isNotEmpty()) {
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = "Спайки (1м): " + lag.minuteCpuSpikes.take(3).joinToString { "${it.processName} ${"%.1f".format(Locale.US, it.cpuPercent)}%" },
+                    style = TnumText.MicroLabel,
+                    color = palette.textPrimary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (lag.topWakeups.isNotEmpty()) {
+                Text(
+                    text = "Wakeups (Alarm/Job): " + lag.topWakeups.take(3).joinToString { "${it.packageName}(${it.count})" },
+                    style = TnumText.MicroLabel,
+                    color = palette.textMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+
+        Spacer(Modifier.height(6.dp))
+
+        // 3. Swap Thrashing & LMKD
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(4.dp))
+                .background(palette.innerSurface)
+                .border(1.dp, palette.border, RoundedCornerShape(4.dp))
+                .padding(8.dp)
+        ) {
+            val vm = lag.vmStatRates
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("3. SWAP-ТРЭШИНГ & LMKD (5 МИН)", style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold), color = palette.textSecondary)
+                Text(
+                    text = "LMK: ${lag.lmkKillsLast5Min.size}",
+                    style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold),
+                    color = if (lag.lmkKillsLast5Min.isNotEmpty()) palette.critRed else palette.okGreen
+                )
+            }
+            Spacer(Modifier.height(3.dp))
+            if (vm.availability == SysfsAvailability.AVAILABLE) {
+                Text(
+                    text = "swapIn:${"%.1f".format(Locale.US, vm.pswpinPerSec)}/s  swapOut:${"%.1f".format(Locale.US, vm.pswpoutPerSec)}/s  " +
+                        "majFlt:${"%.1f".format(Locale.US, vm.pgmajfaultPerSec)}/s  allocStall:${"%.1f".format(Locale.US, vm.allocstallPerSec)}/s",
+                    style = TnumText.MicroLabel,
+                    color = if (vm.allocstallPerSec > 1f) palette.warnAmber else palette.textPrimary
+                )
+            } else {
+                Text(vm.availability.label, style = TnumText.MicroLabel, color = palette.textMuted)
+            }
+            if (lag.lmkKillsLast5Min.isNotEmpty()) {
+                Text(
+                    text = "Убиты: " + lag.lmkKillsLast5Min.takeLast(3).joinToString { "${it.packageName} @${it.timestampLabel}" },
+                    style = TnumText.MicroLabel,
+                    color = palette.critRed,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+
+        Spacer(Modifier.height(6.dp))
+
+        // 4. Disk I/O + 5. Frame / Jank Profiler
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(palette.innerSurface)
+                    .border(1.dp, palette.border, RoundedCornerShape(4.dp))
+                    .padding(8.dp)
+            ) {
+                val disk = lag.diskIo
+                Text("4. ДИСК I/O", style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold), color = palette.textSecondary)
+                Text(
+                    text = if (disk.availability == SysfsAvailability.AVAILABLE) {
+                        "R:${disk.readKbPerSec.toInt()}K W:${disk.writeKbPerSec.toInt()}K\nBusy ${disk.ioBusyPercent.toInt()}%"
+                    } else disk.availability.label,
+                    style = TnumText.MicroLabel,
+                    color = if (disk.isIoBottleneck) palette.critRed else palette.textPrimary
+                )
+                disk.dataFreePercent?.let {
+                    Text("/data free: ${"%.0f".format(Locale.US, it)}%", style = TnumText.MicroLabel, color = palette.textMuted)
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .weight(1.3f)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(palette.innerSurface)
+                    .border(1.dp, palette.border, RoundedCornerShape(4.dp))
+                    .padding(8.dp)
+            ) {
+                val j = lag.jank
+                Text(
+                    text = "5. FRAME / JANK (${j.refreshRateHz.toInt()}Hz)",
+                    style = TnumText.MicroLabel.copy(fontWeight = FontWeight.Bold),
+                    color = palette.textSecondary
+                )
+                Text(
+                    text = "${j.foregroundPackage ?: "--"} · ${j.rendererType ?: "Renderer?"}",
+                    style = TnumText.MicroLabel,
+                    color = palette.accent,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "FPS ${j.fps?.let { "%.0f".format(Locale.US, it) } ?: "--"} · Janky ${j.jankyFramesPercent?.let { "%.1f%%".format(Locale.US, it) } ?: "--"}",
+                    style = TnumText.MicroLabel,
+                    color = if ((j.jankyFramesPercent ?: 0f) >= 10f) palette.critRed else palette.textPrimary
+                )
+                Text(
+                    text = j.dominantCause ?: j.sourceNote,
+                    style = TnumText.MicroLabel,
+                    color = palette.textMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
     }
 }
 

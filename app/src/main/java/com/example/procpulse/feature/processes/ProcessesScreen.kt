@@ -35,7 +35,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -47,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -65,6 +65,7 @@ import com.example.procpulse.core.model.ProcessEntry
 import com.example.procpulse.core.model.ProcessSortBy
 import com.example.procpulse.core.model.ProcessStateTag
 import com.example.procpulse.core.ui.HonestDegradationBanner
+import com.example.procpulse.core.ui.PrecisionFilterChip
 import com.example.procpulse.core.ui.thresholdColor
 import com.example.ui.theme.LocalProcPulsePalette
 import com.example.ui.theme.TnumText
@@ -82,16 +83,17 @@ fun ProcessesScreen(
     filterActiveNet: Boolean,
     filterInMemory: Boolean,
     sortBy: ProcessSortBy,
-    selectedPids: Set<Int>,
-    inspectedPid: Int?,
-    getAppIcon: (String) -> ImageBitmap?,
+    selectedKeys: Set<String>,
+    inspectedKey: String?,
+    getCachedAppIcon: (String) -> ImageBitmap?,
+    loadAppIcon: suspend (String) -> ImageBitmap?,
     onSelectCategory: (ProcessCategory) -> Unit,
     onSearchQueryChange: (String) -> Unit,
     onToggleFilterCpu: () -> Unit,
     onToggleFilterNet: () -> Unit,
     onToggleFilterMem: () -> Unit,
     onSelectSort: (ProcessSortBy) -> Unit,
-    onToggleSelectPid: (Int) -> Unit,
+    onToggleSelectProcess: (ProcessEntry) -> Unit,
     onClearSelection: () -> Unit,
     onBatchForceStop: () -> Unit,
     onBatchFreeze: () -> Unit,
@@ -106,7 +108,6 @@ fun ProcessesScreen(
     var sortMenuExpanded by remember { mutableStateOf(false) }
 
     Column(modifier = modifier.fillMaxSize()) {
-        // Category Tabs
         val categories = ProcessCategory.entries
         ScrollableTabRow(
             selectedTabIndex = categories.indexOf(selectedCategory),
@@ -196,20 +197,20 @@ fun ProcessesScreen(
                 .padding(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            FilterChip(
+            PrecisionFilterChip(
                 selected = filterCpuNonZero,
                 onClick = onToggleFilterCpu,
-                label = { Text("CPU > 0%", style = TnumText.MicroLabel) }
+                label = "CPU > 0%"
             )
-            FilterChip(
+            PrecisionFilterChip(
                 selected = filterActiveNet,
                 onClick = onToggleFilterNet,
-                label = { Text("С сетью", style = TnumText.MicroLabel) }
+                label = "С сетью"
             )
-            FilterChip(
+            PrecisionFilterChip(
                 selected = filterInMemory,
                 onClick = onToggleFilterMem,
-                label = { Text("PSS > 0 MB", style = TnumText.MicroLabel) }
+                label = "PSS > 0 MB"
             )
             Text(
                 text = "Найдено: ${processes.size}",
@@ -220,7 +221,7 @@ fun ProcessesScreen(
         }
 
         // Multi-select batch action bar
-        if (selectedPids.isNotEmpty()) {
+        if (selectedKeys.isNotEmpty()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -231,7 +232,7 @@ fun ProcessesScreen(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "Выбрано: ${selectedPids.size}",
+                    text = "Выбрано: ${selectedKeys.size}",
                     style = TnumText.DataRow.copy(fontWeight = FontWeight.Bold),
                     color = palette.accent
                 )
@@ -267,7 +268,6 @@ fun ProcessesScreen(
             }
         }
 
-        // Tier 0 Usage Access or Native Daemon limitation hint
         if (activeTier == CapabilityTier.STANDARD && !hasUsageStatsPermission) {
             Box(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
                 Row(
@@ -303,7 +303,6 @@ fun ProcessesScreen(
             }
         }
 
-        // Process LazyColumn
         if (processes.isEmpty()) {
             Box(
                 modifier = Modifier.fillMaxSize().padding(24.dp),
@@ -320,20 +319,30 @@ fun ProcessesScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 16.dp)
             ) {
-                items(processes, key = { "${it.pid}_${it.packageName}" }) { proc ->
+                items(processes, key = { it.processKey() }) { proc ->
+                    val key = proc.processKey()
+                    val iconBitmap by produceState(
+                        initialValue = getCachedAppIcon(proc.packageName),
+                        key1 = proc.packageName
+                    ) {
+                        if (value == null) {
+                            value = loadAppIcon(proc.packageName)
+                        }
+                    }
+
                     ProcessRowItem(
                         entry = proc,
-                        isSelected = proc.pid in selectedPids,
-                        isInspected = proc.pid == inspectedPid,
-                        iconBitmap = remember(proc.packageName) { getAppIcon(proc.packageName) },
+                        isSelected = key in selectedKeys,
+                        isInspected = key == inspectedKey,
+                        iconBitmap = iconBitmap,
                         onClick = {
-                            if (selectedPids.isNotEmpty()) {
-                                onToggleSelectPid(proc.pid)
+                            if (selectedKeys.isNotEmpty()) {
+                                onToggleSelectProcess(proc)
                             } else {
                                 onInspectProcess(proc)
                             }
                         },
-                        onLongClick = { onToggleSelectPid(proc.pid) }
+                        onLongClick = { onToggleSelectProcess(proc) }
                     )
                     HorizontalDivider(color = palette.border)
                 }
@@ -372,7 +381,7 @@ private fun ProcessRowItem(
             .background(bg)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 12.dp, vertical = 9.dp)
-            .testTag("process_row_${entry.pid}"),
+            .testTag("process_row_${entry.processKey()}"),
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (iconBitmap != null) {
@@ -433,13 +442,22 @@ private fun ProcessRowItem(
                         .padding(horizontal = 4.dp, vertical = 1.dp)
                 )
             }
-            Text(
-                text = "${entry.packageName} · PID ${entry.pid}",
-                style = TnumText.MicroLabel,
-                color = palette.textMuted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = entry.packageName,
+                    style = TnumText.MicroLabel,
+                    color = palette.textMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                Text(
+                    text = if (entry.pid != null) " · PID ${entry.pid}" else " · PID N/A · UID ${entry.uid}",
+                    style = TnumText.MicroLabel,
+                    color = palette.textMuted,
+                    maxLines = 1
+                )
+            }
         }
 
         Spacer(modifier = Modifier.width(8.dp))

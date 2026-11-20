@@ -435,4 +435,151 @@ Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadProcessD
     return JNI_TRUE;
 }
 
+JNI_EXPORT jint JNICALL
+Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadNodeWithStatus(
+    JNIEnv* env, jobject /*thiz*/, jstring path_j, jobjectArray out_text) {
+    const char* path = env->GetStringUTFChars(path_j, nullptr);
+    if (!path) return -EINVAL;
+    errno = 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int open_err = errno;
+    env->ReleaseStringUTFChars(path_j, path);
+    if (fd < 0) {
+        return open_err != 0 ? -open_err : -EACCES;
+    }
+    char buf[512];
+    ssize_t total = 0;
+    while (total < static_cast<ssize_t>(sizeof(buf) - 1)) {
+        ssize_t n = read(fd, buf + total, sizeof(buf) - 1 - total);
+        if (n <= 0) break;
+        total += n;
+    }
+    close(fd);
+    buf[total] = '\0';
+    while (total > 0 && (buf[total - 1] == '\n' || buf[total - 1] == '\r' || buf[total - 1] == ' ')) {
+        buf[--total] = '\0';
+    }
+    if (out_text && env->GetArrayLength(out_text) > 0) {
+        jstring jstr = env->NewStringUTF(buf);
+        env->SetObjectArrayElement(out_text, 0, jstr);
+        env->DeleteLocalRef(jstr);
+    }
+    return 0;
+}
+
+JNI_EXPORT jboolean JNICALL
+Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadProcStatQueue(
+    JNIEnv* env, jobject /*thiz*/, jlongArray out_arr) {
+    char buf[16384];
+    int len = read_file_stack("/proc/stat", buf, sizeof(buf));
+    if (len <= 0) return JNI_FALSE;
+    if (env->GetArrayLength(out_arr) < 2) return JNI_FALSE;
+    jlong* out = env->GetLongArrayElements(out_arr, nullptr);
+    if (!out) return JNI_FALSE;
+    out[0] = 0;
+    out[1] = 0;
+    const char* p = buf;
+    while (*p) {
+        const char* line_end = std::strchr(p, '\n');
+        if (starts_with(p, "procs_running ")) {
+            const char* c = p + 14;
+            out[0] = static_cast<jlong>(parse_u64(c));
+        } else if (starts_with(p, "procs_blocked ")) {
+            const char* c = p + 14;
+            out[1] = static_cast<jlong>(parse_u64(c));
+        }
+        if (!line_end) break;
+        p = line_end + 1;
+    }
+    env->ReleaseLongArrayElements(out_arr, out, 0);
+    return JNI_TRUE;
+}
+
+JNI_EXPORT jboolean JNICALL
+Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadVmStat(
+    JNIEnv* env, jobject /*thiz*/, jlongArray out_arr) {
+    char buf[16384];
+    int len = read_file_stack("/proc/vmstat", buf, sizeof(buf));
+    if (len <= 0) return JNI_FALSE;
+    if (env->GetArrayLength(out_arr) < 5) return JNI_FALSE;
+    jlong* out = env->GetLongArrayElements(out_arr, nullptr);
+    if (!out) return JNI_FALSE;
+    std::memset(out, 0, sizeof(jlong) * 5);
+
+    const char* p = buf;
+    while (*p) {
+        const char* line_end = std::strchr(p, '\n');
+        if (starts_with(p, "pswpin ")) {
+            const char* c = p + 7;
+            out[0] = static_cast<jlong>(parse_u64(c));
+        } else if (starts_with(p, "pswpout ")) {
+            const char* c = p + 8;
+            out[1] = static_cast<jlong>(parse_u64(c));
+        } else if (starts_with(p, "pgmajfault ")) {
+            const char* c = p + 11;
+            out[2] = static_cast<jlong>(parse_u64(c));
+        } else if (starts_with(p, "allocstall")) {
+            const char* c = p;
+            while (*c && *c != ' ' && *c != '\t' && *c != '\n') ++c;
+            out[3] += static_cast<jlong>(parse_u64(c));
+        } else if (starts_with(p, "compact_stall ")) {
+            const char* c = p + 14;
+            out[4] = static_cast<jlong>(parse_u64(c));
+        }
+        if (!line_end) break;
+        p = line_end + 1;
+    }
+    env->ReleaseLongArrayElements(out_arr, out, 0);
+    return JNI_TRUE;
+}
+
+JNI_EXPORT jboolean JNICALL
+Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadDiskStats(
+    JNIEnv* env, jobject /*thiz*/, jlongArray out_arr) {
+    char buf[16384];
+    int len = read_file_stack("/proc/diskstats", buf, sizeof(buf));
+    if (len <= 0) return JNI_FALSE;
+    if (env->GetArrayLength(out_arr) < 3) return JNI_FALSE;
+    jlong* out = env->GetLongArrayElements(out_arr, nullptr);
+    if (!out) return JNI_FALSE;
+    std::memset(out, 0, sizeof(jlong) * 3);
+
+    bool found = false;
+    const char* p = buf;
+    while (*p) {
+        const char* line_end = std::strchr(p, '\n');
+        const char* c = p;
+        parse_u64(c); // major
+        parse_u64(c); // minor
+        c = skip_ws(c);
+        char dev[32];
+        int di = 0;
+        while (*c && *c != ' ' && *c != '\t' && *c != '\n' && di < 31) {
+            dev[di++] = *c++;
+        }
+        dev[di] = '\0';
+        if (std::strcmp(dev, "mmcblk0") == 0 || std::strcmp(dev, "sda") == 0 || std::strcmp(dev, "nvme0n1") == 0) {
+            parse_u64(c); // reads completed
+            parse_u64(c); // reads merged
+            uint64_t read_sectors = parse_u64(c);
+            parse_u64(c); // ms reading
+            parse_u64(c); // writes completed
+            parse_u64(c); // writes merged
+            uint64_t write_sectors = parse_u64(c);
+            parse_u64(c); // ms writing
+            parse_u64(c); // IOs currently in progress
+            uint64_t io_ticks = parse_u64(c);
+            out[0] = static_cast<jlong>(read_sectors);
+            out[1] = static_cast<jlong>(write_sectors);
+            out[2] = static_cast<jlong>(io_ticks);
+            found = true;
+            break;
+        }
+        if (!line_end) break;
+        p = line_end + 1;
+    }
+    env->ReleaseLongArrayElements(out_arr, out, 0);
+    return found ? JNI_TRUE : JNI_FALSE;
+}
+
 } // extern "C"
