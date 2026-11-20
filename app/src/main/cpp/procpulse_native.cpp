@@ -8,7 +8,8 @@
 #include <cstring>
 #include <cstdio>
 #include <climits>
-#include <string_view>
+
+#define JNI_EXPORT __attribute__((visibility("default"))) JNIEXPORT
 
 namespace {
 
@@ -55,7 +56,7 @@ bool starts_with(const char* line, const char* prefix) {
 
 extern "C" {
 
-JNIEXPORT jlong JNICALL
+JNI_EXPORT jlong JNICALL
 Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadIntFile(
     JNIEnv* env, jobject /*thiz*/, jstring path_j) {
     const char* path = env->GetStringUTFChars(path_j, nullptr);
@@ -70,7 +71,7 @@ Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadIntFile(
     return static_cast<jlong>(val);
 }
 
-JNIEXPORT jstring JNICALL
+JNI_EXPORT jstring JNICALL
 Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadTextFile(
     JNIEnv* env, jobject /*thiz*/, jstring path_j) {
     const char* path = env->GetStringUTFChars(path_j, nullptr);
@@ -85,13 +86,84 @@ Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadTextFile
     return env->NewStringUTF(buf);
 }
 
-// Output layout:
-// out[0] = coreCountRead
-// out[1] = ctxt
-// out[2] = intr
-// For slot i = 0 (total) and 1..N (cpu0..cpuN-1), base = 3 + i * 8:
-// user, nice, sys, idle, iowait, irq, softirq, steal
-JNIEXPORT jint JNICALL
+// Batch read scaling_cur_freq (kHz) for cores 0..num_cores-1 in one JNI crossing
+JNI_EXPORT jint JNICALL
+Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadCpuCurFreqs(
+    JNIEnv* env, jobject /*thiz*/, jint num_cores, jlongArray out_khz) {
+    jsize arr_len = env->GetArrayLength(out_khz);
+    int limit = num_cores < arr_len ? num_cores : arr_len;
+    jlong* out = env->GetLongArrayElements(out_khz, nullptr);
+    if (!out) return 0;
+
+    char path[128];
+    char buf[64];
+    int read_ok = 0;
+    for (int i = 0; i < limit; ++i) {
+        std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", i);
+        int len = read_file_stack(path, buf, sizeof(buf));
+        if (len > 0) {
+            char* end = nullptr;
+            long long val = std::strtoll(buf, &end, 10);
+            if (end != buf) {
+                out[i] = static_cast<jlong>(val);
+                ++read_ok;
+                continue;
+            }
+        }
+        out[i] = 0;
+    }
+
+    env->ReleaseLongArrayElements(out_khz, out, 0);
+    return read_ok;
+}
+
+// Batch read /sys/class/thermal/thermal_zone* in one JNI crossing
+JNI_EXPORT jint JNICALL
+Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadThermalZones(
+    JNIEnv* env, jobject /*thiz*/, jint max_zones, jintArray out_ids, jlongArray out_temps, jobjectArray out_types) {
+    jsize capacity = env->GetArrayLength(out_ids);
+    jint* ids = env->GetIntArrayElements(out_ids, nullptr);
+    jlong* temps = env->GetLongArrayElements(out_temps, nullptr);
+    if (!ids || !temps) {
+        if (ids) env->ReleaseIntArrayElements(out_ids, ids, JNI_ABORT);
+        if (temps) env->ReleaseLongArrayElements(out_temps, temps, JNI_ABORT);
+        return 0;
+    }
+
+    char path[128];
+    char type_buf[128];
+    char temp_buf[64];
+    int count = 0;
+
+    for (int i = 0; i < max_zones && count < capacity; ++i) {
+        std::snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/temp", i);
+        int tlen = read_file_stack(path, temp_buf, sizeof(temp_buf));
+        if (tlen <= 0) continue;
+        char* end = nullptr;
+        long long temp_val = std::strtoll(temp_buf, &end, 10);
+        if (end == temp_buf) continue;
+
+        std::snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/type", i);
+        int nlen = read_file_stack(path, type_buf, sizeof(type_buf));
+        if (nlen <= 0) continue;
+        while (nlen > 0 && (type_buf[nlen - 1] == '\n' || type_buf[nlen - 1] == '\r' || type_buf[nlen - 1] == ' ')) {
+            type_buf[--nlen] = '\0';
+        }
+
+        ids[count] = i;
+        temps[count] = static_cast<jlong>(temp_val);
+        jstring jtype = env->NewStringUTF(type_buf);
+        env->SetObjectArrayElement(out_types, count, jtype);
+        env->DeleteLocalRef(jtype);
+        ++count;
+    }
+
+    env->ReleaseIntArrayElements(out_ids, ids, 0);
+    env->ReleaseLongArrayElements(out_temps, temps, 0);
+    return count;
+}
+
+JNI_EXPORT jint JNICALL
 Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadProcStat(
     JNIEnv* env, jobject /*thiz*/, jlongArray out_arr) {
     char buf[16384];
@@ -107,7 +179,6 @@ Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadProcStat
     const char* p = buf;
     while (*p) {
         const char* line_end = std::strchr(p, '\n');
-        size_t line_len = line_end ? static_cast<size_t>(line_end - p) : std::strlen(p);
 
         if (starts_with(p, "cpu")) {
             int slot = -1;
@@ -137,7 +208,6 @@ Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadProcStat
 
         if (!line_end) break;
         p = line_end + 1;
-        (void)line_len;
     }
 
     if (arr_len > 0) out[0] = cores_read;
@@ -145,10 +215,7 @@ Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadProcStat
     return cores_read;
 }
 
-// Output layout (all in KB):
-// 0: MemTotal, 1: MemFree, 2: MemAvailable, 3: Buffers, 4: Cached,
-// 5: SReclaimable, 6: SwapTotal, 7: SwapFree, 8: Active(anon), 9: Inactive(anon), 10: Slab
-JNIEXPORT jboolean JNICALL
+JNI_EXPORT jboolean JNICALL
 Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadMemInfo(
     JNIEnv* env, jobject /*thiz*/, jlongArray out_arr) {
     char buf[8192];
@@ -191,8 +258,7 @@ Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadMemInfo(
     return JNI_TRUE;
 }
 
-// out[0] = some avg10, out[1] = full avg10
-JNIEXPORT jboolean JNICALL
+JNI_EXPORT jboolean JNICALL
 Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadPsiMemory(
     JNIEnv* env, jobject /*thiz*/, jdoubleArray out_arr) {
     char buf[512];
@@ -215,8 +281,7 @@ Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadPsiMemor
     return JNI_TRUE;
 }
 
-// out[0]=orig_data_size, out[1]=compr_data_size, out[2]=mem_used_total (bytes)
-JNIEXPORT jboolean JNICALL
+JNI_EXPORT jboolean JNICALL
 Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadZramMmStat(
     JNIEnv* env, jobject /*thiz*/, jlongArray out_arr) {
     char buf[256];
@@ -237,7 +302,7 @@ Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadZramMmSt
     return JNI_TRUE;
 }
 
-JNIEXPORT jint JNICALL
+JNI_EXPORT jint JNICALL
 Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeListPids(
     JNIEnv* env, jobject /*thiz*/, jintArray out_pids) {
     DIR* dir = opendir("/proc");
@@ -267,10 +332,7 @@ Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeListPids(
     return count;
 }
 
-// out[0]=ppid, out[1]=utime, out[2]=stime, out[3]=nice, out[4]=num_threads,
-// out[5]=starttime, out[6]=rss_kb, out[7]=oom_score_adj, out[8]=fd_count,
-// out[9]=pss_kb, out[10]=uss_kb, out[11]=swap_pss_kb
-JNIEXPORT jboolean JNICALL
+JNI_EXPORT jboolean JNICALL
 Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadProcessDetail(
     JNIEnv* env, jobject /*thiz*/, jint pid, jlongArray out_arr) {
     jsize arr_len = env->GetArrayLength(out_arr);
@@ -291,22 +353,20 @@ Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadProcessD
     const char* rparen = std::strrchr(buf, ')');
     if (rparen && rparen[1] == ' ') {
         const char* p = rparen + 2;
-        // field 3: state (char), skip it
         p = skip_ws(p);
         if (*p) ++p;
         int64_t ppid = parse_i64(p);
         out[0] = ppid;
-        // Skip fields 5..13 (9 ints)
         for (int i = 5; i <= 13; ++i) parse_i64(p);
-        uint64_t utime = parse_u64(p);  // 14
-        uint64_t stime = parse_u64(p);  // 15
-        parse_i64(p); // cutime 16
-        parse_i64(p); // cstime 17
-        parse_i64(p); // priority 18
-        int64_t nice_val = parse_i64(p); // 19
-        int64_t threads = parse_i64(p); // 20
-        parse_i64(p); // itrealvalue 21
-        uint64_t starttime = parse_u64(p); // 22
+        uint64_t utime = parse_u64(p);
+        uint64_t stime = parse_u64(p);
+        parse_i64(p);
+        parse_i64(p);
+        parse_i64(p);
+        int64_t nice_val = parse_i64(p);
+        int64_t threads = parse_i64(p);
+        parse_i64(p);
+        uint64_t starttime = parse_u64(p);
         out[1] = static_cast<jlong>(utime);
         out[2] = static_cast<jlong>(stime);
         out[3] = static_cast<jlong>(nice_val);
@@ -317,7 +377,7 @@ Java_com_example_procpulse_core_nativebridge_NativeProcReader_nativeReadProcessD
     std::snprintf(path, sizeof(path), "/proc/%d/statm", pid);
     if (read_file_stack(path, buf, sizeof(buf)) > 0) {
         const char* p = buf;
-        parse_u64(p); // size
+        parse_u64(p);
         uint64_t resident_pages = parse_u64(p);
         long page_kb = sysconf(_SC_PAGESIZE) / 1024;
         if (page_kb <= 0) page_kb = 4;

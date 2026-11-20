@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -21,21 +23,41 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Build Release APK
+      - name: Run Unit & Robolectric Tests
+        run: ./gradlew :app:testDebugUnitTest
+
+      - name: Build Multi-ABI & Universal Release APKs
         env:
           KEYSTORE_PATH: ${{ secrets.KEYSTORE_PATH }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew assembleRelease
+        run: ./gradlew assembleRelease -PabiSplits
 
-      - name: Verify Offline Manifest (No INTERNET)
+      - name: Verify Offline Manifest (Zero INTERNET Permission)
         run: |
-          apkanalyzer manifest permissions app/build/outputs/apk/release/app-release.apk | (! grep -q "android.permission.INTERNET")
+          for apk in app/build/outputs/apk/release/*.apk; do
+            echo "Checking $apk"
+            if apkanalyzer manifest permissions "$apk" | grep -q "android.permission.INTERNET"; then
+              echo "ERROR: INTERNET permission detected in $apk"
+              exit 1
+            fi
+          done
+
+      - name: Package Release Artifacts & SHA-256 Checksums
+        run: |
+          mkdir -p dist-release
+          cp app/build/outputs/apk/release/*.apk dist-release/
+          cp app/build/outputs/mapping/release/mapping.txt dist-release/ || true
+          (cd dist-release && sha256sum * > SHA256SUMS.txt)
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: procpulse-release-apks
+          path: dist-release/*
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            app/build/outputs/apk/release/*.apk
-            app/build/outputs/mapping/release/mapping.txt
+          files: dist-release/*

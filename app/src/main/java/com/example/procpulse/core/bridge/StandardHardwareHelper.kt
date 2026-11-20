@@ -80,6 +80,11 @@ class StandardHardwareHelper(
     private val memInfoBuf = LongArray(11)
     private val zramBuf = LongArray(3)
     private val psiBuf = DoubleArray(2)
+    private val curFreqsKhzBuf = LongArray(coreCount)
+    private val thermalIdsBuf = IntArray(40)
+    private val thermalTempsBuf = LongArray(40)
+    private val thermalTypesBuf = arrayOfNulls<String>(40)
+    private var cachedGovernor: String? = null
 
     init {
         detectCpuTopology()
@@ -205,17 +210,17 @@ class StandardHardwareHelper(
             prevStatTimeMs = now
         }
 
-        var governor = "schedutil"
+        NativeProcReader.readCpuCurFreqsBatch(coreCount, curFreqsKhzBuf)
+        val governor = cachedGovernor ?: (NativeProcReader.readTextFile("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") ?: "schedutil").also {
+            cachedGovernor = it
+        }
         val cores = ArrayList<CpuCoreSnapshot>(coreCount)
         for (i in 0 until coreCount) {
-            val curKhz = NativeProcReader.readLongFile("/sys/devices/system/cpu/cpu$i/cpufreq/scaling_cur_freq") ?: 0L
-            val curMhz = (curKhz / 1000L).toInt()
+            val curMhz = (curFreqsKhzBuf[i] / 1000L).toInt()
             if (cachedMaxFreqsMhz[i] == 0) {
                 val maxKhz = NativeProcReader.readLongFile("/sys/devices/system/cpu/cpu$i/cpufreq/cpuinfo_max_freq") ?: 0L
                 cachedMaxFreqsMhz[i] = (maxKhz / 1000L).toInt()
             }
-            val gov = NativeProcReader.readTextFile("/sys/devices/system/cpu/cpu$i/cpufreq/scaling_governor")
-            if (gov != null && i == 0) governor = gov
 
             var coreUsage: Float? = null
             if (isExact && i + 1 <= statRead) {
@@ -244,7 +249,7 @@ class StandardHardwareHelper(
                     usagePercent = coreUsage,
                     currentFreqMhz = curMhz,
                     maxFreqMhz = cachedMaxFreqsMhz[i],
-                    governor = gov ?: governor
+                    governor = governor
                 )
             )
         }
@@ -464,16 +469,15 @@ class StandardHardwareHelper(
 
     private fun readThermalZonesFromSysfs(batteryTempC: Float): List<ThermalZoneInfo> {
         val result = mutableListOf<ThermalZoneInfo>()
-        for (i in 0 until 40) {
-            val base = "/sys/class/thermal/thermal_zone$i"
-            if (!File(base).exists()) continue
-            val rawType = NativeProcReader.readTextFile("$base/type") ?: continue
-            val rawTemp = NativeProcReader.readLongFile("$base/temp") ?: continue
+        val count = NativeProcReader.readThermalZonesBatch(40, thermalIdsBuf, thermalTempsBuf, thermalTypesBuf)
+        for (idx in 0 until count) {
+            val rawType = thermalTypesBuf[idx] ?: continue
+            val rawTemp = thermalTempsBuf[idx]
             val tempC = if (abs(rawTemp) > 200) rawTemp / 1000f else rawTemp.toFloat()
             if (tempC < -20f || tempC > 130f) continue
             val friendly = mapThermalType(rawType)
             if (friendly != null) {
-                result.add(ThermalZoneInfo(i, rawType, friendly, tempC))
+                result.add(ThermalZoneInfo(thermalIdsBuf[idx], rawType, friendly, tempC))
             }
         }
         if (result.none { it.friendlyCategory == "Battery" } && batteryTempC > 0f) {

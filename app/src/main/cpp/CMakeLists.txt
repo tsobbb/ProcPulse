@@ -10,6 +10,20 @@ add_library(
     procpulse_native.cpp
 )
 
+target_compile_options(procpulse_native PRIVATE
+    -O3
+    -Wall
+    -Wextra
+    -fvisibility=hidden
+    -ffunction-sections
+    -fdata-sections
+)
+
+target_link_options(procpulse_native PRIVATE
+    -Wl,--gc-sections
+    -Wl,--strip-all
+)
+
 find_library(log-lib log)
 
 target_link_libraries(

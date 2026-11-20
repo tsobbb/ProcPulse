@@ -18,12 +18,44 @@ object NativeProcReader {
 
     private external fun nativeReadIntFile(path: String): Long
     private external fun nativeReadTextFile(path: String): String?
+    private external fun nativeReadCpuCurFreqs(numCores: Int, outKhz: LongArray): Int
+    private external fun nativeReadThermalZones(maxZones: Int, outIds: IntArray, outTemps: LongArray, outTypes: Array<String?>): Int
     private external fun nativeReadProcStat(outArr: LongArray): Int
     private external fun nativeReadMemInfo(outArr: LongArray): Boolean
     private external fun nativeReadPsiMemory(outArr: DoubleArray): Boolean
     private external fun nativeReadZramMmStat(outArr: LongArray): Boolean
     private external fun nativeListPids(outPids: IntArray): Int
     private external fun nativeReadProcessDetail(pid: Int, outArr: LongArray): Boolean
+
+    fun readCpuCurFreqsBatch(numCores: Int, outKhz: LongArray): Int {
+        if (isNativeLoaded) {
+            return nativeReadCpuCurFreqs(numCores, outKhz)
+        }
+        var ok = 0
+        for (i in 0 until minOf(numCores, outKhz.size)) {
+            val v = readLongFile("/sys/devices/system/cpu/cpu$i/cpufreq/scaling_cur_freq") ?: 0L
+            outKhz[i] = v
+            if (v > 0L) ok++
+        }
+        return ok
+    }
+
+    fun readThermalZonesBatch(maxZones: Int, outIds: IntArray, outTemps: LongArray, outTypes: Array<String?>): Int {
+        if (isNativeLoaded) {
+            return nativeReadThermalZones(maxZones, outIds, outTemps, outTypes)
+        }
+        var count = 0
+        for (i in 0 until maxZones) {
+            if (count >= outIds.size) break
+            val temp = readLongFile("/sys/class/thermal/thermal_zone$i/temp") ?: continue
+            val type = readTextFile("/sys/class/thermal/thermal_zone$i/type") ?: continue
+            outIds[count] = i
+            outTemps[count] = temp
+            outTypes[count] = type
+            count++
+        }
+        return count
+    }
 
     fun readLongFile(path: String): Long? {
         if (isNativeLoaded) {
